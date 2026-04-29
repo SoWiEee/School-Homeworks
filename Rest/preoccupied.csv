@@ -1,0 +1,13 @@
+id,arrival_time,type,party_size,baby_chair,wheel_chair,est_dining_time
+-1,-1,FAMILY,4,0,0,999
+-1,-1,FAMILY,4,0,0,999
+-1,-1,FAMILY,4,0,0,999
+-1,-1,FAMILY,4,0,0,999
+-1,-1,FAMILY,4,0,0,999
+-1,-1,FAMILY,4,0,0,999
+-1,-1,FAMILY,4,0,0,999
+-1,-1,WHEELCHAIR,2,0,1,999
+-1,-1,WITH_BABY,2,1,0,999
+1,1,INDIVIDUAL,1,0,0,5
+2,2,FAMILY,4,0,0,10
+3,5,WHEELCHAIR,3,0,1,10

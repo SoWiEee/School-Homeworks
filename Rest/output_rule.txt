@@ -1,0 +1,12 @@
+[Thread ID] [時間] [事件類型] ID: {id} | 需求: {資源需求} | 動作結果 | 剩餘資源: S={單人}, 4P={四人桌}, 6P={六人桌}, B={嬰兒椅}, W={輪椅}
+
+Example: 
+[236274] [5] [WITH_BABY] ID: 1 | 需求: 2 single_seats, 1 baby_chair | seated, id:[S01,S02] | 剩餘資源: S=18, 4P=8, 6P=5, B=3, W=2
+[438983] [10] [WHEELCHAIR] ID: 2 | 需求: 1 four_seat_sofa, 1 wheelchair | seated, id:[4P01] | 剩餘資源: S=18, 4P=7, 6P=5, B=3, W=1
+[669032] [12] [WHEELCHAIR] ID: 3 | 需求: 1 six_seat_sofa, 2 wheelchair | waited | 剩餘資源: S=18, 4P=7, 6P=5, B=3, W=1
+[984442] [15] [INDIVIDUAL] ID: 4 | 需求: 1 single_seat | seated, id:[S04] | 剩餘資源: S=17, 4P=7, 6P=5, B=3, W=1
+
+[236274] [18] [WITH_BABY] ID: 1 | 需求: 2 single_seats, 1 baby_chair | release, id:[S01,S02] | 剩餘資源: S=19, 4P=7, 6P=5, B=4, W=1
+[438983] [19] [WHEELCHAIR] ID: 2 | 需求: 1 four_seat_sofa, 1 wheelchair | release, id:[4P01] | 剩餘資源: S=19, 4P=8, 6P=5, B=4, W=2
+
+[669032] [20] [WHEELCHAIR] ID: 3 | 需求: 1 six_seat_sofa, 2 wheelchair | seated, id:[6P01] | 剩餘資源: S=19, 4P=8, 6P=4, B=4, W=0

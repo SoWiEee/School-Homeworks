@@ -1,0 +1,111 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="來源檔案">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="標頭檔">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="資源檔">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="core\Shader.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="vendor\glad\src\glad.c">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="core\Texture.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="core\Camera.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="core\rendering\Primitives.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="core\rendering\PostProcessor.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="core\rendering\DeferredRenderer.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="core\rendering\SSAO.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+    <ClCompile Include="core\rendering\InstancedMesh.cpp">
+      <Filter>來源檔案</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="core\Shader.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="vendor\stb\stb_image.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="vendor\glad\include\glad\glad.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="core\Texture.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="core\Camera.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="core\GBuffer.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="core\rendering\Primitives.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="core\rendering\PostProcessor.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="core\rendering\DeferredRenderer.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="core\rendering\SSAO.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+    <ClInclude Include="core\rendering\InstancedMesh.h">
+      <Filter>標頭檔</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="assets\textures\heightmap.jpg">
+      <Filter>資源檔</Filter>
+    </Image>
+    <Image Include="assets\textures\rock.jpg">
+      <Filter>資源檔</Filter>
+    </Image>
+    <Image Include="assets\textures\dirt.jpg">
+      <Filter>資源檔</Filter>
+    </Image>
+    <Image Include="assets\textures\snow.jpg">
+      <Filter>資源檔</Filter>
+    </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="assets\shaders\gbuffer.frag" />
+    <None Include="assets\shaders\gbuffer.vert" />
+    <None Include="assets\shaders\deferred_shading.vert" />
+    <None Include="assets\shaders\deferred_shading.frag" />
+    <None Include="assets\shaders\light_box.frag" />
+    <None Include="assets\shaders\light_box.vert" />
+    <None Include="assets\shaders\blur.frag" />
+    <None Include="assets\shaders\debug_quad.vert" />
+    <None Include="assets\shaders\final_bloom.frag" />
+    <None Include="assets\shaders\ssao.frag" />
+    <None Include="assets\shaders\ssao_blur.frag" />
+  </ItemGroup>
+</Project>

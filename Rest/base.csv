@@ -1,0 +1,6 @@
+id,arrival_time,type,party_size,baby_chair,wheel_chair,est_dining_time
+1,0,INDIVIDUAL,1,0,0,5
+2,2,FAMILY,4,0,0,10
+3,5,WITH_BABY,3,1,0,12
+4,8,WHEELCHAIR,2,0,1,15
+5,10,FAMILY,6,0,0,20
