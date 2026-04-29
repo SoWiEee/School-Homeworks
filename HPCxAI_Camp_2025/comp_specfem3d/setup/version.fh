@@ -1,0 +1,4 @@
+! version information
+character(len=*), parameter :: git_package_version = "v8.1.0-261-gcb0a08c2"
+character(len=*), parameter :: git_commit_version = "cb0a08c2fa76cca0430f546d88fff6dba75ca950"
+character(len=*), parameter :: git_date_version = "2025-03-06 15:55:09 +0100"
