@@ -1,16 +1,36 @@
+# CPP Practice Collection
 
-<h1 align="center">👋 2023_C++_training👋</h1>
-<h3 align="center">Files of practices are placed in folder -- Hw !</h3>
+此資料夾收錄 C++ 課程期間的練習、作業與歷屆考古題解答，重點在基本語法、流程控制、函式、資料結構基礎與解題能力。
 
+## 目錄說明
 
-## 📝Introduction
-This repo is for c++ programming practices, there are some questions from the following books:
+- `Hw/`：平時作業（章節題）
+- `3.29/`、`4.12/`、`5.3/`、`5.10/`：課堂練習與日期分類題目
+- `107考古/`、`109考古/`、`110考古/`、`111考古/`：歷屆測驗題解
 
-[Absolute C++](https://camo.githubusercontent.com/88b6d69b547171ebecd85158e62712a63cbaaa44243ef9c92e847de4666112fd/68747470733a2f2f692e696d6775722e636f6d2f506a31714e31572e706e67)
+## 命名慣例
 
-## ⚡Usage
-1. Histroy Test：Test[amount]_Q[number].cpp
-2. Homework：Ch[chapter]_[number].cpp
-3. Download：click `Code` button -> Downoald `Zip`
+- `Test[考次]_Q[題號].cpp`：考古題檔案
+- `Q[題號].cpp`：單次練習題
+- 其他資料檔（如 `input.txt`, `money.txt`）為對應題目的測資
 
+## 編譯與執行
 
+以 g++ 為例：
+
+```bash
+g++ -std=c++17 -O2 -o run Q1.cpp
+./run
+```
+
+若題目需讀取輸入檔，可使用重新導向：
+
+```bash
+./run < input.txt
+```
+
+## 內容來源
+
+- 課堂講義與作業
+- 歷屆試題練習
+- 參考書籍：Absolute C++
