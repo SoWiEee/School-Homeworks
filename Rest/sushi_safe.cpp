@@ -1,21 +1,5 @@
-// sushi_safe.cpp
-// g++ -std=c++17 -O3 -pthread sushi_safe.cpp -o sushi4.exe -fexec-charset=big5
+// g++ -std=c++17 -O3 -pthread sushi_safe.cpp -o sushi.exe -fexec-charset=big5
 // ./sushi path/to/test.csv
-
-// [!] Line 366 如果家庭有 baby 的話會被丟到吧檯 (is_baby = true)
-// const bool is_baby  = (c.BabyNeed > 0) || (c.Type == CustomerType::WITH_BABY);
-// => const bool is_baby  = (c.Type == CustomerType::WITH_BABY);
-
-// [!] Line 549 如果家庭有 baby 的話會印出單人座 (is_baby = true)
-// const bool is_baby  = (c.BabyNeed > 0) || (c.Type == CustomerType::WITH_BABY);
-// => const bool is_baby  = (c.Type == CustomerType::WITH_BABY);
-
-// [!] Line 574 修正 Line 366, 549 之後的副作用，需要知道是否有被降級才能印出正確的需求字串（但資源分配是正確的）
-// [X] [FAMILY] 需求: 1 four_seat_sofa | seated, id:[S06,S07,S08,S09]
-// parts.push_back((c.PartySize <= 4) ? "1 four_seat_sofa" : "1 six_seat_sofa");
-// if (c.BabyNeed > 0) parts.push_back(to_string(c.BabyNeed) + " baby_chair");
-// if (c.WheelNeed > 0) parts.push_back(to_string(c.WheelNeed) + " wheelchair");
-// => 窩不會修 QQ
 
 #include <algorithm>
 #include <atomic>
