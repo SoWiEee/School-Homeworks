@@ -2,3 +2,5 @@ screenshots/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+BCCD_Dataset/
+circular_output/

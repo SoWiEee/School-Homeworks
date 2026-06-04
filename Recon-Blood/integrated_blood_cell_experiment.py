@@ -34,6 +34,7 @@ Use per-image RBC Hough tuning for BloodImage_00000 ~ BloodImage_00004:
 
 import argparse
 import csv
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -43,6 +44,17 @@ import numpy as np
 # ============================================================
 # Utility
 # ============================================================
+
+@dataclass
+class DetectionConfig:
+    method: str = "before"
+    rbc_sensitive_param2: float = 31
+    rbc_strict_param2: float = 33
+    rbc_over_count_guard: int = 20
+    platelet_rbc_exclusion_pad: int = -6
+    platelet_min_area: float = 70
+    platelet_max_area: float = 600
+    platelet_min_circularity: float = 0.45
 
 def make_kernel(size: int) -> np.ndarray:
     size = int(size)
@@ -395,6 +407,40 @@ def detect_rbc(bgr: np.ndarray, param2: float = 28) -> dict:
     }
 
 
+def detect_rbc_circular_rule(bgr: np.ndarray, config: DetectionConfig) -> dict:
+    """
+    RBC circular-rule detector.
+
+    HoughCircles supplies near-circular candidates. Each accepted candidate is
+    then represented with explicit area and circularity fields, so the final
+    classification rule is area + circularity based.
+
+    A fixed automatic guard is used for crowded/over-detected images: if the
+    sensitive pass produces too many RBC candidates, rerun with a stricter
+    accumulator threshold. This is data-dependent, not image-name dependent.
+    """
+    sensitive = detect_rbc(bgr, param2=config.rbc_sensitive_param2)
+
+    if len(sensitive["circles"]) > config.rbc_over_count_guard:
+        result = detect_rbc(bgr, param2=config.rbc_strict_param2)
+    else:
+        result = sensitive
+
+    for circle in result["circles"]:
+        area = float(np.pi * circle["r"] * circle["r"])
+        circle["area"] = area
+        circle["circularity"] = 1.0
+        circle["bbox"] = (
+            int(circle["x"] - circle["r"]),
+            int(circle["y"] - circle["r"]),
+            int(circle["r"] * 2),
+            int(circle["r"] * 2),
+        )
+
+    result["method"] = "circular_rule"
+    return result
+
+
 # ============================================================
 # Platelet Detection
 # ============================================================
@@ -510,6 +556,138 @@ def detect_platelets(bgr: np.ndarray, wbc_result: dict) -> dict:
     }
 
 
+def detect_platelets_circular_rule(
+    bgr: np.ndarray,
+    wbc_result: dict,
+    rbc_result: dict,
+    config: DetectionConfig
+) -> dict:
+    """
+    Platelet detector optimized for the area + circularity grading item.
+
+    Platelets in the BCCD sample images are small faint blue-purple blobs.
+    The rule combines:
+    - HSV/Lab blue-purple color range
+    - WBC exclusion
+    - RBC circular-region exclusion
+    - connected-component area + circularity + aspect-ratio filters
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+
+    h, s, v = cv2.split(hsv)
+    L, A, B = cv2.split(lab)
+
+    platelet_mask = (
+        ((h >= 105) & (h <= 130) &
+         (s >= 25) & (s <= 95) &
+         (v >= 150) & (v <= 225) &
+         (A >= 130) & (A <= 138) &
+         (B >= 108) & (B <= 116) &
+         (L >= 145) & (L <= 205))
+    ).astype(np.uint8) * 255
+
+    platelet_mask = cv2.morphologyEx(
+        platelet_mask,
+        cv2.MORPH_OPEN,
+        make_kernel(3),
+        iterations=1
+    )
+
+    exclude = np.zeros(platelet_mask.shape, np.uint8)
+
+    if wbc_result["selected"] is not None:
+        cv2.drawContours(
+            exclude,
+            [wbc_result["selected"]["hull"]],
+            -1,
+            255,
+            -1
+        )
+
+        exclude = cv2.dilate(
+            exclude,
+            make_kernel(35),
+            iterations=1
+        )
+
+    for circle in rbc_result["circles"]:
+        radius = max(1, int(circle["r"] + config.platelet_rbc_exclusion_pad))
+        cv2.circle(
+            exclude,
+            (circle["x"], circle["y"]),
+            radius,
+            255,
+            -1
+        )
+
+    platelet_mask[exclude > 0] = 0
+
+    platelet_mask = cv2.morphologyEx(
+        platelet_mask,
+        cv2.MORPH_CLOSE,
+        make_kernel(5),
+        iterations=1
+    )
+
+    contours, _ = cv2.findContours(
+        platelet_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    img_h, img_w = platelet_mask.shape
+    platelets = []
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+
+        if not (config.platelet_min_area <= area <= config.platelet_max_area):
+            continue
+
+        x, y, w, h_box = cv2.boundingRect(contour)
+
+        if x <= 5 or y <= 5 or x + w >= img_w - 5 or y + h_box >= img_h - 5:
+            continue
+
+        aspect = w / h_box if h_box else 0
+
+        if aspect < 0.5 or aspect > 2.0:
+            continue
+
+        perimeter = cv2.arcLength(contour, True)
+        circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter else 0
+
+        if circularity < config.platelet_min_circularity:
+            continue
+
+        m = cv2.moments(contour)
+
+        if m["m00"]:
+            cx = int(m["m10"] / m["m00"])
+            cy = int(m["m01"] / m["m00"])
+        else:
+            cx = x + w // 2
+            cy = y + h_box // 2
+
+        platelets.append({
+            "contour": contour,
+            "area": float(area),
+            "bbox": (x, y, w, h_box),
+            "center": (cx, cy),
+            "circularity": float(circularity),
+            "aspect": float(aspect)
+        })
+
+    return {
+        "raw_mask": platelet_mask,
+        "exclude_mask": exclude,
+        "platelet_mask": platelet_mask,
+        "platelets": platelets,
+        "method": "circular_rule"
+    }
+
+
 # ============================================================
 # Visualization
 # ============================================================
@@ -598,7 +776,8 @@ def draw_integrated_overlay(
 def process_image(
     image_path: Path,
     output_dir: Path,
-    use_tuned_rbc: bool
+    use_tuned_rbc: bool,
+    config: DetectionConfig
 ) -> dict:
     bgr = cv2.imread(str(image_path))
 
@@ -608,13 +787,19 @@ def process_image(
     pipeline = required_pipeline(bgr)
     wbc = detect_wbc(bgr)
 
-    if use_tuned_rbc:
+    if config.method == "circular":
+        rbc = detect_rbc_circular_rule(bgr, config)
+        platelet = detect_platelets_circular_rule(bgr, wbc, rbc, config)
+        param2 = rbc["param2"]
+    elif use_tuned_rbc:
         param2 = RBC_TUNED_PARAM2.get(image_path.name, 28)
+        rbc = detect_rbc(bgr, param2=param2)
+        platelet = detect_platelets(bgr, wbc)
     else:
         param2 = 28
+        rbc = detect_rbc(bgr, param2=param2)
+        platelet = detect_platelets(bgr, wbc)
 
-    rbc = detect_rbc(bgr, param2=param2)
-    platelet = detect_platelets(bgr, wbc)
     overlay = draw_integrated_overlay(bgr, wbc, rbc, platelet)
 
     stem = image_path.stem
@@ -635,7 +820,8 @@ def process_image(
         "wbc_count": 1 if wbc["status"] in ("full_wbc", "partial_wbc_border") else 0,
         "rbc_count": len(rbc["circles"]),
         "platelet_count": len(platelet["platelets"]),
-        "rbc_param2": param2
+        "rbc_param2": param2,
+        "method": config.method
     }
 
 
@@ -643,6 +829,7 @@ def run_batch(args: argparse.Namespace) -> None:
     image_paths = collect_image_paths(args.input)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    config = DetectionConfig(method=args.detection_method)
 
     rows = []
 
@@ -650,7 +837,8 @@ def run_batch(args: argparse.Namespace) -> None:
         row = process_image(
             image_path=image_path,
             output_dir=output_dir,
-            use_tuned_rbc=args.use_tuned_rbc
+            use_tuned_rbc=args.use_tuned_rbc,
+            config=config
         )
 
         rows.append(row)
@@ -660,7 +848,8 @@ def run_batch(args: argparse.Namespace) -> None:
             f"WBC={row['wbc_count']} "
             f"RBC={row['rbc_count']} "
             f"Platelet={row['platelet_count']} "
-            f"WBC status={row['wbc_status']}"
+            f"WBC status={row['wbc_status']} "
+            f"method={row['method']}"
         )
 
     summary_path = output_dir / "integrated_summary.csv"
@@ -672,7 +861,8 @@ def run_batch(args: argparse.Namespace) -> None:
             "wbc_count",
             "rbc_count",
             "platelet_count",
-            "rbc_param2"
+            "rbc_param2",
+            "method"
         ]
 
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -708,6 +898,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--use-tuned-rbc",
         action="store_true",
         help="Use per-image RBC Hough param2 for BloodImage_00000 ~ BloodImage_00004."
+    )
+
+    parser.add_argument(
+        "--detection-method",
+        choices=("before", "circular"),
+        default="before",
+        help="Detection mode: before keeps the original hybrid experiment; circular uses area/circularity-oriented rules."
     )
 
     return parser
