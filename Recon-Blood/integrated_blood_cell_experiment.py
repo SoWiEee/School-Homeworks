@@ -700,11 +700,23 @@ def draw_integrated_overlay(
 ) -> np.ndarray:
     overlay = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    # WBC: hull + bounding box
-    if wbc["selected"] is not None and wbc["status"] in ("full_wbc", "partial_wbc_border"):
-        color = (0, 255, 0) if wbc["status"] == "full_wbc" else (255, 165, 0)
-        cv2.drawContours(overlay, [wbc["selected"]["hull"]], -1, color, 3)
+    wbc_hulls = [h for h in wbc["hulls"] if h["area"] >= 6000]
 
+    # WBC: hull + bounding box
+    for wbc_hull in wbc_hulls:
+        color = (255, 165, 0) if wbc_hull["touches"] else (0, 255, 0)
+        cv2.drawContours(overlay, [wbc_hull["hull"]], -1, color, 3)
+
+        x, y, w, h = wbc_hull["bbox"]
+        cv2.rectangle(
+            overlay,
+            (x, y),
+            (x + w, y + h),
+            (255, 0, 0),
+            2
+        )
+
+    if not wbc_hulls and wbc["selected"] is not None and wbc["status"] in ("full_wbc", "partial_wbc_border"):
         x, y, w, h = wbc["selected"]["bbox"]
         cv2.rectangle(
             overlay,
@@ -753,7 +765,9 @@ def draw_integrated_overlay(
             -1
         )
 
-    wbc_count = 1 if wbc["status"] in ("full_wbc", "partial_wbc_border") else 0
+    wbc_count = len(wbc_hulls)
+    if wbc_count == 0 and wbc["status"] in ("full_wbc", "partial_wbc_border"):
+        wbc_count = 1
 
     cv2.putText(
         overlay,
@@ -814,10 +828,14 @@ def process_image(
     cv2.imwrite(str(output_dir / f"{stem}_platelet_mask.png"), platelet["platelet_mask"])
     cv2.imwrite(str(output_dir / f"{stem}_integrated_overlay.png"), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
 
+    wbc_count = len([h for h in wbc["hulls"] if h["area"] >= 6000])
+    if wbc_count == 0 and wbc["status"] in ("full_wbc", "partial_wbc_border"):
+        wbc_count = 1
+
     return {
         "file": image_path.name,
         "wbc_status": wbc["status"],
-        "wbc_count": 1 if wbc["status"] in ("full_wbc", "partial_wbc_border") else 0,
+        "wbc_count": wbc_count,
         "rbc_count": len(rbc["circles"]),
         "platelet_count": len(platelet["platelets"]),
         "rbc_param2": param2,
