@@ -48,13 +48,26 @@ import numpy as np
 @dataclass
 class DetectionConfig:
     method: str = "before"
-    rbc_sensitive_param2: float = 31
-    rbc_strict_param2: float = 33
-    rbc_over_count_guard: int = 20
+    rbc_sensitive_param2: float = 33
+    rbc_strict_param2: float = 42
+    rbc_over_count_guard: int = 14
     platelet_rbc_exclusion_pad: int = -6
     platelet_min_area: float = 70
     platelet_max_area: float = 600
     platelet_min_circularity: float = 0.45
+
+
+def build_detection_config(method: str) -> DetectionConfig:
+    if method == "circular_demo":
+        return DetectionConfig(
+            method=method,
+            rbc_sensitive_param2=31,
+            rbc_strict_param2=33,
+            rbc_over_count_guard=20,
+        )
+
+    return DetectionConfig(method=method)
+
 
 def make_kernel(size: int) -> np.ndarray:
     size = int(size)
@@ -801,7 +814,7 @@ def process_image(
     pipeline = required_pipeline(bgr)
     wbc = detect_wbc(bgr)
 
-    if config.method == "circular":
+    if config.method in ("circular", "circular_demo"):
         rbc = detect_rbc_circular_rule(bgr, config)
         platelet = detect_platelets_circular_rule(bgr, wbc, rbc, config)
         param2 = rbc["param2"]
@@ -847,7 +860,7 @@ def run_batch(args: argparse.Namespace) -> None:
     image_paths = collect_image_paths(args.input)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
-    config = DetectionConfig(method=args.detection_method)
+    config = build_detection_config(args.detection_method)
 
     rows = []
 
@@ -920,9 +933,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--detection-method",
-        choices=("before", "circular"),
+        choices=("before", "circular", "circular_demo"),
         default="before",
-        help="Detection mode: before keeps the original hybrid experiment; circular uses area/circularity-oriented rules."
+        help="Detection mode: before keeps the original hybrid experiment; circular uses dataset-balanced area/circularity rules; circular_demo keeps the earlier first-5-image demo profile."
     )
 
     return parser
