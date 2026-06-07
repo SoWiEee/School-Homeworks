@@ -35,7 +35,58 @@ PLT_PURP_S_MIN = 38      # minimum saturation for purple blobs
 PLT_PURP_V_HI  = 210     # maximum value (brightness)
 PLT_MIN_AREA   = 400     # minimum contour area
 PLT_MAX_AREA   = 3000    # maximum contour area
+# ── Classify mode parameters (area + circularity rules) ──────────────────────
+CL_WBC_AREA_MIN = 18000
+CL_RBC_AREA_MIN = 2000;  CL_RBC_AREA_MAX = 18000;  CL_RBC_CIRC_MIN = 0.45
+CL_PLT_AREA_MIN = 300;   CL_PLT_AREA_MAX = 2000
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _circularity(cnt):
+    area = cv2.contourArea(cnt)
+    peri = cv2.arcLength(cnt, True)
+    return (4 * np.pi * area / (peri ** 2)) if peri > 0 else 0.0
+
+
+def detect_cells_classify(img_bgr):
+    """
+    Area + circularity rules classifier.
+
+    Strategy:
+      1. Adaptive threshold to find all cell blobs
+      2. Morphological closing to fill RBC rings into solid discs
+      3. Classify each contour by area and circularity:
+           circularity = 4π × area / perimeter²  (1.0 = perfect circle)
+           WBC : area ≥ CL_WBC_AREA_MIN
+           RBC : CL_RBC_AREA_MIN ≤ area < CL_RBC_AREA_MAX AND circ ≥ CL_RBC_CIRC_MIN
+           PLT : CL_PLT_AREA_MIN ≤ area ≤ CL_PLT_AREA_MAX (remaining small blobs)
+    """
+    gray    = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (7, 7), 1.5)
+
+    # Adaptive threshold: blockSize=61 (larger block) to reduce small-noise fragments
+    adaptive = cv2.adaptiveThreshold(blurred, 255,
+                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 61, 8)
+
+    # Large closing to fill RBC biconcave ring into a solid disc
+    closed = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    # Opening to separate weakly-connected blobs
+    opened = cv2.morphologyEx(closed,   cv2.MORPH_OPEN,  np.ones((5,  5),  np.uint8))
+
+    all_cnts, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    wbc_cnts, rbc_cnts, plt_cnts = [], [], []
+    for cnt in all_cnts:
+        area = cv2.contourArea(cnt)
+        circ = _circularity(cnt)
+        if area >= CL_WBC_AREA_MIN:
+            wbc_cnts.append(cnt)
+        elif CL_RBC_AREA_MIN <= area < CL_RBC_AREA_MAX and circ >= CL_RBC_CIRC_MIN:
+            rbc_cnts.append(cnt)
+        elif CL_PLT_AREA_MIN <= area <= CL_PLT_AREA_MAX:
+            plt_cnts.append(cnt)
+
+    return len(wbc_cnts), len(rbc_cnts), len(plt_cnts), opened
 
 
 def detect_cells(img_bgr):
@@ -183,5 +234,45 @@ def evaluate(split="test", verbose=False):
     return we, re, pe
 
 
+def evaluate_classify(split="test"):
+    img_dir   = f"TXL-PBC_Dataset/TXL-PBC/images/{split}"
+    label_dir = f"TXL-PBC_Dataset/TXL-PBC/labels/{split}"
+    img_files = sorted(glob.glob(f"{img_dir}/*.png"))
+
+    gt_wbc = gt_rbc = gt_plt = 0
+    pr_wbc = pr_rbc = pr_plt = 0
+
+    for img_path in img_files:
+        stem = os.path.splitext(os.path.basename(img_path))[0]
+        lbl  = f"{label_dir}/{stem}.txt"
+        img  = cv2.imread(img_path)
+        w_gt, r_gt, p_gt = load_gt(lbl)
+        w_pr, r_pr, p_pr, _ = detect_cells_classify(img)
+
+        gt_wbc += w_gt; gt_rbc += r_gt; gt_plt += p_gt
+        pr_wbc += w_pr; pr_rbc += r_pr; pr_plt += p_pr
+
+    def err(gt, pr):
+        return (pr - gt) / gt if gt else (0.0 if pr == 0 else float('inf'))
+
+    we, re, pe = err(gt_wbc, pr_wbc), err(gt_rbc, pr_rbc), err(gt_plt, pr_plt)
+
+    print(f"\n{'='*52}")
+    print(f"  [classify] Split: {split}   Images: {len(img_files)}")
+    print(f"{'='*52}")
+    print(f"{'Cell':<6} {'GT':>6} {'Pred':>6} {'Error':>8}  Status")
+    print(f"{'-'*52}")
+    for name, gt, pr, e in [("WBC", gt_wbc, pr_wbc, we),
+                             ("RBC", gt_rbc, pr_rbc, re),
+                             ("PLT", gt_plt, pr_plt, pe)]:
+        status = "OK" if abs(e) <= 0.30 else ("OVER" if e > 0 else "UNDER")
+        print(f"{name:<6} {gt:>6} {pr:>6} {e:>+8.1%}  {status}")
+    print(f"{'='*52}")
+    return we, re, pe
+
+
 if __name__ == "__main__":
+    print("=== Pipeline mode ===")
     evaluate("test")
+    print("\n=== Classify mode (area + circularity) ===")
+    evaluate_classify("test")
