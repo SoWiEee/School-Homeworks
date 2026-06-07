@@ -11,7 +11,7 @@
 | 項目 | 規定 |
 | --- | --- |
 | 作業形式 | 個人作業 |
-| 資料集 | [Shenggan BCCD Dataset（GitHub）](https://github.com/Shenggan/BCCD_Dataset) |
+| 資料集 | [TXL-PBC_Dataset（GitHub）](https://github.com/lugan113/TXL-PBC_Dataset) |
 | 開發環境 | Python + OpenCV + Streamlit（建議使用 Google Colab） |
 | 演算法限制 | 禁止使用深度學習（YOLO、CNN 等） |
 | 繳交方式 | Colab 連結（或 `.ipynb` 檔案）+ 現場 Demo |
