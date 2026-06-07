@@ -53,8 +53,12 @@ class DetectionConfig:
     rbc_over_count_guard: int = 14
     platelet_rbc_exclusion_pad: int = -6
     platelet_min_area: float = 70
-    platelet_max_area: float = 600
-    platelet_min_circularity: float = 0.45
+    platelet_max_area: float = 900
+    platelet_min_circularity: float = 0.25
+    platelet_min_aspect: float = 0.6
+    platelet_max_aspect: float = 1.8
+    platelet_wbc_overlap_max: float = 0.0
+    platelet_rbc_overlap_max: float = 0.25
 
 
 def build_detection_config(method: str) -> DetectionConfig:
@@ -607,41 +611,41 @@ def detect_platelets_circular_rule(
         iterations=1
     )
 
-    exclude = np.zeros(platelet_mask.shape, np.uint8)
-
-    if wbc_result["selected"] is not None:
-        cv2.drawContours(
-            exclude,
-            [wbc_result["selected"]["hull"]],
-            -1,
-            255,
-            -1
-        )
-
-        exclude = cv2.dilate(
-            exclude,
-            make_kernel(35),
-            iterations=1
-        )
-
-    for circle in rbc_result["circles"]:
-        radius = max(1, int(circle["r"] + config.platelet_rbc_exclusion_pad))
-        cv2.circle(
-            exclude,
-            (circle["x"], circle["y"]),
-            radius,
-            255,
-            -1
-        )
-
-    platelet_mask[exclude > 0] = 0
-
     platelet_mask = cv2.morphologyEx(
         platelet_mask,
         cv2.MORPH_CLOSE,
         make_kernel(5),
         iterations=1
     )
+
+    wbc_exclude = np.zeros(platelet_mask.shape, np.uint8)
+
+    if wbc_result["selected"] is not None:
+        cv2.drawContours(
+            wbc_exclude,
+            [wbc_result["selected"]["hull"]],
+            -1,
+            255,
+            -1
+        )
+
+        wbc_exclude = cv2.dilate(
+            wbc_exclude,
+            make_kernel(35),
+            iterations=1
+        )
+
+    rbc_exclude = np.zeros(platelet_mask.shape, np.uint8)
+
+    for circle in rbc_result["circles"]:
+        radius = max(1, int(circle["r"] + config.platelet_rbc_exclusion_pad))
+        cv2.circle(
+            rbc_exclude,
+            (circle["x"], circle["y"]),
+            radius,
+            255,
+            -1
+        )
 
     contours, _ = cv2.findContours(
         platelet_mask,
@@ -651,6 +655,7 @@ def detect_platelets_circular_rule(
 
     img_h, img_w = platelet_mask.shape
     platelets = []
+    filtered_mask = np.zeros_like(platelet_mask)
 
     for contour in contours:
         area = cv2.contourArea(contour)
@@ -665,13 +670,25 @@ def detect_platelets_circular_rule(
 
         aspect = w / h_box if h_box else 0
 
-        if aspect < 0.5 or aspect > 2.0:
+        if aspect < config.platelet_min_aspect or aspect > config.platelet_max_aspect:
             continue
 
         perimeter = cv2.arcLength(contour, True)
         circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter else 0
 
         if circularity < config.platelet_min_circularity:
+            continue
+
+        contour_mask = np.zeros_like(platelet_mask)
+        cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+        contour_pixels = max(1, int(np.count_nonzero(contour_mask)))
+        wbc_overlap = np.count_nonzero((contour_mask > 0) & (wbc_exclude > 0)) / contour_pixels
+        rbc_overlap = np.count_nonzero((contour_mask > 0) & (rbc_exclude > 0)) / contour_pixels
+
+        if wbc_overlap > config.platelet_wbc_overlap_max:
+            continue
+
+        if rbc_overlap > config.platelet_rbc_overlap_max:
             continue
 
         m = cv2.moments(contour)
@@ -689,13 +706,17 @@ def detect_platelets_circular_rule(
             "bbox": (x, y, w, h_box),
             "center": (cx, cy),
             "circularity": float(circularity),
-            "aspect": float(aspect)
+            "aspect": float(aspect),
+            "wbc_overlap": float(wbc_overlap),
+            "rbc_overlap": float(rbc_overlap)
         })
+
+        cv2.drawContours(filtered_mask, [contour], -1, 255, -1)
 
     return {
         "raw_mask": platelet_mask,
-        "exclude_mask": exclude,
-        "platelet_mask": platelet_mask,
+        "exclude_mask": cv2.bitwise_or(wbc_exclude, rbc_exclude),
+        "platelet_mask": filtered_mask,
         "platelets": platelets,
         "method": "circular_rule"
     }
