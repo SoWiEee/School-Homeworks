@@ -35,33 +35,27 @@ WS_CLOSE_K     = 18
 WS_DIST_THRESH = 0.40
 
 
-def _watershed_boundaries(gray, wbc_excl, h, w):
+def _hough_seeded_watershed(img_bgr, rbc_centers, h, w):
     """
-    Watershed + Distance Transform — cell boundary visualization.
-    Used for display only; cell counting is done by Hough Circles.
+    Hough-seeded Watershed: draws Hough circles as cell regions, dilates to connect
+    adjacent circles, then lets Watershed find boundaries between touching RBCs.
     Returns ws_markers (-1 = boundary pixels).
     """
-    blurred = cv2.GaussianBlur(gray, (5, 5), 1)
-    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY_INV, 31, 5)
-    thresh = cv2.bitwise_and(thresh, cv2.bitwise_not(wbc_excl))
-    filled = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE,
-                              np.ones((WS_CLOSE_K, WS_CLOSE_K), np.uint8))
-    opened = cv2.morphologyEx(filled, cv2.MORPH_OPEN,
-                              np.ones((10, 10), np.uint8))
-    sure_bg = cv2.dilate(opened, np.ones((3, 3), np.uint8), iterations=2)
-    dist = cv2.distanceTransform(opened, cv2.DIST_L2, 5)
-    max_d = dist.max()
-    if max_d == 0:
-        return np.ones((h, w), np.int32)
-    _, sure_fg = cv2.threshold(dist, WS_DIST_THRESH * max_d, 255, 0)
-    sure_fg = sure_fg.astype(np.uint8)
-    unknown = cv2.subtract(sure_bg, sure_fg)
-    _, markers = cv2.connectedComponents(sure_fg)
-    markers = markers + 1
-    markers[unknown == 255] = 0
-    img_ws = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    markers = cv2.watershed(img_ws, markers.copy())
+    # Draw filled Hough circles; dilate to connect adjacent cells
+    cell_mask = np.zeros((h, w), np.uint8)
+    for (cx, cy, r) in rbc_centers:
+        cv2.circle(cell_mask, (cx, cy), r, 255, -1)
+    cell_union = cv2.dilate(cell_mask, np.ones((7, 7), np.uint8), iterations=1)
+
+    markers = np.zeros((h, w), np.int32)
+    markers[cell_union == 0] = 1   # sure background → label 1
+    for i, (cx, cy, r) in enumerate(rbc_centers):
+        seed_r = max(3, r // 4)
+        cx_c = int(np.clip(cx, 0, w - 1))
+        cy_c = int(np.clip(cy, 0, h - 1))
+        cv2.circle(markers, (cx_c, cy_c), seed_r, i + 2, -1)
+
+    markers = cv2.watershed(img_bgr.copy(), markers.copy())
     return markers
 
 
@@ -114,8 +108,8 @@ def detect_cells(img_bgr):
             if wbc_excl[cy_c, cx_c] == 0:
                 rbc_centers.append((int(cx), int(cy), int(r)))
 
-    # ── Step 2b: Watershed boundary visualization ──────────────────────
-    ws_markers = _watershed_boundaries(gray, wbc_excl, h, w)
+    # ── Step 2b: Hough-seeded Watershed boundary visualization ─────────
+    ws_markers = _hough_seeded_watershed(img_bgr, rbc_centers, h, w)
 
     # ── Step 3: PLT ────────────────────────────────────────────────────
     rbc_excl = np.zeros((h, w), np.uint8)
@@ -134,7 +128,9 @@ def detect_cells(img_bgr):
 
     # ── Debug visualization ────────────────────────────────────────────
     debug = img_bgr.copy()
-    debug[ws_markers == -1] = [0, 220, 220]  # Watershed boundaries in yellow
+    boundary = (ws_markers == -1).astype(np.uint8)
+    boundary = cv2.dilate(boundary, np.ones((2, 2), np.uint8), iterations=1)
+    debug[boundary > 0] = [0, 220, 220]  # Watershed boundaries in yellow (thickened)
     for cnt in wbc_cnts:
         x, y, bw, bh = cv2.boundingRect(cnt)
         cv2.rectangle(debug, (x, y), (x + bw, y + bh), (0, 200, 0), 2)
