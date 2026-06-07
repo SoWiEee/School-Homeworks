@@ -15,7 +15,7 @@ WBC_OPEN_K      = 9
 WBC_MIN_AREA    = 9500
 WBC_PAD         = 65
 
-# ── RBC (Hough — kept as fallback reference) ──────────────────────────────────
+# ── RBC (Hough Circles) ───────────────────────────────────────────────────────
 RBC_MIN_DIST = 38
 RBC_PARAM1   = 50
 RBC_PARAM2   = 12
@@ -30,79 +30,39 @@ PLT_V_HI     = 210
 PLT_MIN_AREA = 400
 PLT_MAX_AREA = 3000
 
-# ── Watershed RBC separation ──────────────────────────────────────────────────
-WS_CLOSE_K     = 18    # closing kernel to fill RBC biconcave centre
-WS_OPEN_K      = 10    # opening kernel to remove PLT-sized noise before watershed
-WS_DIST_THRESH = 0.40  # distance-transform peak threshold (lower → more detections)
+# ── Watershed (visualization only) ───────────────────────────────────────────
+WS_CLOSE_K     = 18
+WS_DIST_THRESH = 0.40
 
 
-def _watershed_rbc(gray, wbc_excl, h, w):
+def _watershed_boundaries(gray, wbc_excl, h, w):
     """
-    Watershed + Distance Transform to separate and count overlapping RBCs.
-
-    Returns:
-        rbc_circles : list of (cx, cy, r) for each detected RBC region
-        ws_markers  : marker image (watershed result; -1 = boundary)
+    Watershed + Distance Transform — cell boundary visualization.
+    Used for display only; cell counting is done by Hough Circles.
+    Returns ws_markers (-1 = boundary pixels).
     """
     blurred = cv2.GaussianBlur(gray, (5, 5), 1)
-
-    # Adaptive threshold — picks up RBC rings and other cell structures
     thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                    cv2.THRESH_BINARY_INV, 31, 5)
-
-    # Exclude WBC regions so they don't interfere with RBC counting
     thresh = cv2.bitwise_and(thresh, cv2.bitwise_not(wbc_excl))
-
-    # Large closing: fills the pale biconcave centre of RBCs into solid discs
     filled = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE,
                               np.ones((WS_CLOSE_K, WS_CLOSE_K), np.uint8))
-
-    # Opening: removes PLT-scale noise (< ~10px radius)
     opened = cv2.morphologyEx(filled, cv2.MORPH_OPEN,
-                              np.ones((WS_OPEN_K, WS_OPEN_K), np.uint8))
-
-    # Sure background via dilation
+                              np.ones((10, 10), np.uint8))
     sure_bg = cv2.dilate(opened, np.ones((3, 3), np.uint8), iterations=2)
-
-    # Distance transform — each RBC disc produces a peak at its centre
     dist = cv2.distanceTransform(opened, cv2.DIST_L2, 5)
-
-    # Sure foreground: pixels above threshold percentage of local max
-    max_dist = dist.max()
-    if max_dist == 0:
-        return [], np.ones((h, w), np.int32)
-
-    _, sure_fg = cv2.threshold(dist, WS_DIST_THRESH * max_dist, 255, 0)
+    max_d = dist.max()
+    if max_d == 0:
+        return np.ones((h, w), np.int32)
+    _, sure_fg = cv2.threshold(dist, WS_DIST_THRESH * max_d, 255, 0)
     sure_fg = sure_fg.astype(np.uint8)
-
-    # Unknown region (neither sure foreground nor sure background)
     unknown = cv2.subtract(sure_bg, sure_fg)
-
-    # Label connected foreground peaks as markers
     _, markers = cv2.connectedComponents(sure_fg)
-    markers = markers + 1          # background label → 1
-    markers[unknown == 255] = 0    # unknown → 0 (let watershed decide)
-
-    # Run Watershed
+    markers = markers + 1
+    markers[unknown == 255] = 0
     img_ws = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     markers = cv2.watershed(img_ws, markers.copy())
-
-    # Extract one circle per watershed region (for drawing and PLT exclusion)
-    rbc_circles = []
-    for label in np.unique(markers):
-        if label <= 1:   # 1 = background, -1 = boundary
-            continue
-        mask = np.uint8(markers == label) * 255
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in cnts:
-            area = cv2.contourArea(cnt)
-            # Size filter: keep only RBC-scale regions
-            if area < 800:   # too small (noise or PLT fragment)
-                continue
-            (cx, cy), r = cv2.minEnclosingCircle(cnt)
-            rbc_circles.append((int(cx), int(cy), max(1, int(r))))
-
-    return rbc_circles, markers
+    return markers
 
 
 def detect_cells(img_bgr):
@@ -110,8 +70,9 @@ def detect_cells(img_bgr):
     Returns (wbc_count, rbc_count, plt_count, debug_img).
 
     Step 1: WBC  — gray threshold + purple HSV → large contours
-    Step 2: RBC  — Watershed + Distance Transform (separates overlapping cells)
-    Step 3: PLT  — purple HSV mask, excluding WBC and RBC regions
+    Step 2: RBC  — Hough Circle Transform (counting)
+              +  Watershed + Distance Transform (boundary visualization)
+    Step 3: PLT  — purple HSV mask
     """
     h, w = img_bgr.shape[:2]
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -138,12 +99,27 @@ def detect_cells(img_bgr):
                       (min(w, x + bw + WBC_PAD), min(h, y + bh + WBC_PAD)),
                       255, -1)
 
-    # ── Step 2: RBC via Watershed + Distance Transform ─────────────────
-    rbc_circles, ws_markers = _watershed_rbc(gray, wbc_excl, h, w)
+    # ── Step 2a: RBC counting via Hough Circles ────────────────────────
+    blur5 = cv2.GaussianBlur(gray, (5, 5), 1)
+    circles = cv2.HoughCircles(
+        blur5, cv2.HOUGH_GRADIENT, dp=1,
+        minDist=RBC_MIN_DIST, param1=RBC_PARAM1, param2=RBC_PARAM2,
+        minRadius=RBC_MIN_R, maxRadius=RBC_MAX_R
+    )
+    rbc_centers = []
+    if circles is not None:
+        for (cx, cy, r) in np.round(circles[0]).astype(int):
+            cy_c = int(np.clip(cy, 0, h - 1))
+            cx_c = int(np.clip(cx, 0, w - 1))
+            if wbc_excl[cy_c, cx_c] == 0:
+                rbc_centers.append((int(cx), int(cy), int(r)))
+
+    # ── Step 2b: Watershed boundary visualization ──────────────────────
+    ws_markers = _watershed_boundaries(gray, wbc_excl, h, w)
 
     # ── Step 3: PLT ────────────────────────────────────────────────────
     rbc_excl = np.zeros((h, w), np.uint8)
-    for (cx, cy, r) in rbc_circles:
+    for (cx, cy, r) in rbc_centers:
         cv2.circle(rbc_excl, (cx, cy), r + 10, 255, -1)
 
     all_excl = cv2.bitwise_or(wbc_excl, rbc_excl)
@@ -158,20 +134,19 @@ def detect_cells(img_bgr):
 
     # ── Debug visualization ────────────────────────────────────────────
     debug = img_bgr.copy()
-    # Watershed boundaries shown in yellow
-    debug[ws_markers == -1] = [0, 220, 220]
+    debug[ws_markers == -1] = [0, 220, 220]  # Watershed boundaries in yellow
     for cnt in wbc_cnts:
         x, y, bw, bh = cv2.boundingRect(cnt)
         cv2.rectangle(debug, (x, y), (x + bw, y + bh), (0, 200, 0), 2)
         cv2.putText(debug, "WBC", (x, max(0, y - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1)
-    for (cx, cy, r) in rbc_circles:
+    for (cx, cy, r) in rbc_centers:
         cv2.circle(debug, (cx, cy), r, (0, 0, 220), 1)
     for cnt in plt_dets:
         x, y, bw, bh = cv2.boundingRect(cnt)
         cv2.rectangle(debug, (x, y), (x + bw, y + bh), (220, 0, 0), 1)
 
-    return len(wbc_cnts), len(rbc_circles), len(plt_dets), debug
+    return len(wbc_cnts), len(rbc_centers), len(plt_dets), debug
 
 
 def load_gt(label_path):
