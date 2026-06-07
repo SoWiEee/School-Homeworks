@@ -145,6 +145,61 @@
 
 ---
 
+## Watershed + Distance Transform 重疊細胞切分
+
+### 問題動機
+
+Hough Circle Transform 在 RBC 緊密聚集時容易漏偵測重疊區域（相鄰圓圓心距離 < minDist 時被濾掉）。Watershed 演算法可將相鄰細胞的連通區域切分為個別細胞，更準確地計數堆疊 RBC。
+
+### 演算法流程
+
+```
+灰階影像
+    │
+    ├─ GaussianBlur(5×5)
+    │
+    ├─ Adaptive Threshold(31, 5) → BINARY_INV
+    │    排除 WBC 區域（bitwise_and with NOT wbc_excl）
+    │
+    ├─ morphClose(18×18)  ← 填滿 RBC 雙凹圓盤中心（變成 solid disc）
+    │
+    ├─ morphOpen(10×10)   ← 去除血小板尺度雜訊（< ~300 px²）
+    │
+    ├─ dilate(3×3, iter=2) → sure_bg（確定背景）
+    │
+    ├─ distanceTransform(DIST_L2)
+    │    每個 RBC disc 中心出現距離峰值
+    │
+    ├─ threshold(dist > 0.40 × max) → sure_fg（確定前景，即細胞種子）
+    │
+    ├─ unknown = sure_bg − sure_fg
+    │
+    ├─ connectedComponents(sure_fg) → markers
+    │    markers + 1（背景 → 1），unknown → 0
+    │
+    ├─ cv2.watershed(img, markers) → -1 = 細胞邊界
+    │
+    └─ 每個 label > 1 的區域 → minEnclosingCircle → (cx, cy, r)
+         面積 < 800 px² 的區域排除（非 RBC 碎片）
+```
+
+### 視覺效果
+
+結果影像中黃色細線為 Watershed 分割邊界，直觀顯示：
+- 原本黏在一起的 RBC 群被切割成獨立個體
+- 每個分割區域對應一個 RBC 計數
+
+### 關鍵參數
+
+| 參數 | 值 | 說明 |
+|------|----|------|
+| `WS_CLOSE_K` | 18 | 填滿 RBC 雙凹中心的 closing kernel |
+| `WS_OPEN_K` | 10 | 去除 PLT 尺度雜訊的 opening kernel |
+| `WS_DIST_THRESH` | 0.40 | Distance Transform 峰值閾值（越低→偵測越多種子） |
+| 面積濾波 | 800 px² | 排除非 RBC 的小型分割碎片 |
+
+---
+
 ## 最終參數設定
 
 ```python
