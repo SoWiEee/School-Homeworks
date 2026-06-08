@@ -24,11 +24,9 @@ from blood_cell_detector import (
     counts_to_csv_bytes,
     detect_cells,
     draw_boxes,
-    draw_combined,
     encode_png,
     list_images,
     load_image,
-    load_platelet_model,
     load_yolo_gt,
     predictions_to_csv_bytes,
     preprocess_pipeline,
@@ -45,12 +43,6 @@ DEFAULT_FULL_ROOTS = [
     Path("/mnt/data/TXL-PBC_Dataset/TXL-PBC"),
 ]
 SAMPLE_ROOT = APP_DIR / "samples"
-MODEL_PATH = APP_DIR / "et_platelet_model.pkl"
-
-
-@st.cache_resource(show_spinner=False)
-def cached_model(model_path: str):
-    return load_platelet_model(model_path)
 
 
 def first_existing_root() -> Path:
@@ -69,7 +61,7 @@ def percent_badge(value: float) -> str:
 
 
 st.title("TXL-PBC Blood Smear Cell Counter - Classical CV Streamlit App")
-st.caption("No deep learning is used. The pipeline uses grayscale, Gaussian blur, adaptive thresholding, morphology, area/circularity rules, optional watershed, and optional ExtraTrees on handcrafted platelet features.")
+st.caption("No deep learning is used. The pipeline uses grayscale, Gaussian blur, adaptive thresholding, morphology, and area / circularity / colour / texture rules for WBC, RBC and platelets, plus optional watershed for overlapping RBCs.")
 
 with st.sidebar:
     st.header("Data")
@@ -91,13 +83,7 @@ with st.sidebar:
     img_path = image_paths[image_names.index(selected_name)]
 
     st.header("Detector")
-    mode = st.selectbox(
-        "Detection mode",
-        ["Improved classical", "Rule-based only"],
-        help="Improved classical uses ExtraTrees on handcrafted platelet features. Rule-based only uses area/circularity/color rules for all cell types.",
-    )
     use_watershed = st.checkbox("Use Watershed RBC supplementation", value=False, help="Adds distance-transform watershed candidates for adjacent/overlapping RBCs. Useful for demo; may increase false positives on some images.")
-    platelet_threshold = st.slider("Platelet ML threshold", 0.10, 0.95, 0.60, 0.05)
 
     st.header("Preprocessing parameters")
     gaussian_kernel = st.slider("Gaussian kernel", 3, 13, 5, 2)
@@ -109,12 +95,9 @@ with st.sidebar:
 
 img = load_image(img_path)
 gts = load_yolo_gt(img_path, str(dataset_root))
-model = cached_model(str(MODEL_PATH)) if MODEL_PATH.exists() else None
 preds = detect_cells(
     img,
-    mode=mode,
-    platelet_model=model,
-    platelet_threshold=platelet_threshold,
+    mode="Rule-based only",
     use_watershed=use_watershed,
     gaussian_kernel=gaussian_kernel,
     adaptive_block_ratio=adaptive_block_ratio,
@@ -173,9 +156,7 @@ for row_start in range(0, len(visible_stage_names), 4):
             st.markdown(f"**{name}**")
             st.image(bgr_to_rgb(stages[name]), use_container_width=True)
 
-st.subheader("Combined overlay and downloads")
-combined = draw_combined(img, gts, preds)
-st.image(bgr_to_rgb(combined), caption="Combined GT and Pred overlay", use_container_width=True)
+st.subheader("Downloads")
 
 d1, d2, d3 = st.columns(3)
 with d1:
@@ -203,10 +184,9 @@ with d3:
 with st.expander("Implementation notes"):
     st.markdown(
         """
-- **WBC:** purple/violet stain mask + dilation to merge fragmented nuclei + size/color rules.
-- **RBC:** adaptive-threshold contour extraction + area, aspect ratio and circularity rules.
-- **Platelet rule mode:** small purple connected components + area/circularity/color rules.
-- **Improved classical mode:** platelet candidates are classified by ExtraTrees using handcrafted color, shape and local-context features. This is classical ML, not a deep neural network.
+- **WBC:** purple/violet stain mask, morphological opening to isolate the solid nucleus core, small dilation to merge fragmented lobes, then size/colour rules. The box is the nucleus core (avoids field-spanning boxes).
+- **RBC:** adaptive-threshold contour extraction + area, aspect ratio and circularity rules. The box half-size is biased toward the resolution-derived radius r0, since GT RBC boxes are ~2*r0 and very consistent.
+- **Platelet:** small purple connected components separated from uniform purple specks by *granular internal texture* (saturation / grayscale variation) plus colour and size gates. Fixed box size matches the consistent platelet GT.
 - **Watershed:** distance transform peaks are used as markers, then watershed boundaries are overlaid in red. The checkbox can add these candidates to RBC counting.
         """
     )

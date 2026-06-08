@@ -221,14 +221,21 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     purple, H, S, V, L, A, B = purple_mask_strict(img)
-    rad = int(max(5, round(r0 * 0.32)))
-    cluster = cv2.dilate(purple, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)))
+    # Keep only the solid nucleus cores. Opening removes the thin purple that some
+    # images show around RBC rims and small stain specks, so the bounding box is
+    # the WBC nucleus itself rather than a scattered cluster spanning the field.
+    core_k = ensure_odd(int(max(3, round(r0 * 0.18))))
+    cores = cv2.morphologyEx(purple, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (core_k, core_k)))
+    # Merge the fragmented lobes of one nucleus only (small dilation, not enough
+    # to bridge separate cells).
+    rad = int(max(3, round(r0 * 0.20)))
+    cluster = cv2.dilate(cores, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)))
     ncl, labcl, _, _ = cv2.connectedComponentsWithStats(cluster, 8)
     boxes: List[List[float]] = []
     for ci in range(1, ncl):
-        region = (labcl == ci) & (purple > 0)
+        region = (labcl == ci) & (cores > 0)
         original_area = int(region.sum())
-        if original_area < max(90, 0.25 * r0 * r0):
+        if original_area < max(90, 0.9 * r0 * r0):
             continue
         ys, xs = np.where(region)
         if len(xs) == 0:
@@ -242,7 +249,8 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
         large_geom = (bw > 1.05 * r0 and bh > 0.75 * r0) or (bw > 0.75 * r0 and bh > 1.05 * r0)
         leuk_color = (mean_b < 116 and mean_h < 160) or (mean_s > 108 and mean_b < 120)
         if large_geom and leuk_color:
-            pad = int(0.22 * max(bw, bh) + 0.22 * r0)
+            # GT box is ~1.03x the nucleus-core bbox, so only a small pad is needed.
+            pad = int(0.06 * max(bw, bh))
             score = original_area / (r0 * r0)
             boxes.append([0, max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad), score])
     return merge_by_center(boxes, 0.90 * r0), purple
@@ -289,7 +297,9 @@ def detect_rbc_rule(
             cy = m["m01"] / m["m00"]
         if purple_d[int(min(h - 1, max(0, cy))), int(min(w - 1, max(0, cx)))] > 0:
             continue
-        radius = float(np.clip(0.5 * max(bw, bh), r0 * 0.47, r0 * 1.35))
+        # GT RBC boxes are ~2*r0 per side and very consistent, so bias the box
+        # half-size toward r0 (the resolution-derived radius) for better IoU.
+        radius = float(np.clip(0.5 * max(bw, bh), r0 * 0.88, r0 * 1.18))
         score = circularity - 0.08 * abs(radius - r0) / r0
         candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), score])
     return merge_by_center(candidates, 0.43 * r0)
@@ -430,41 +440,39 @@ def extract_platelet_components(img: np.ndarray) -> Tuple[np.ndarray, List[Box]]
 
 
 def detect_platelets_rule(img: np.ndarray, min_circularity: float = 0.15) -> List[Box]:
-    """Rule-only platelet detector using small purple component area and circularity."""
+    """Rule-only platelet detector.
+
+    Real platelets are small purple bodies with granular internal texture, so they
+    are separated from uniform purple specks by saturation/grayscale *variation*
+    (S std, gray std) plus colour and size gates derived on the training split.
+    The boxes are given a fixed size (~0.84*r0 per side) to match the very
+    consistent platelet ground-truth boxes.
+    """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
-    mask, H, S, V, L, A, B = purple_mask_loose(img)
-    n, labels, stats, cent = cv2.connectedComponentsWithStats(mask, 8)
-    boxes: List[List[float]] = []
-    for i in range(1, n):
-        x, y, bw, bh, area = stats[i]
-        if area < max(3, 0.003 * r0 * r0) or area > 0.18 * r0 * r0:
+    feats, boxes = extract_platelet_components(img)
+    if len(boxes) == 0:
+        return []
+    # Feature column layout comes from extract_platelet_components():
+    #   0 area_r, 5 circularity, 19 S_mean, 20 S_std, 43 B_mean, 50 gray_std.
+    half = 0.42 * r0
+    out: List[List[float]] = []
+    for f, b in zip(feats, boxes):
+        area_r, circ = float(f[0]), float(f[5])
+        s_mean, s_std, b_mean, gray_std = float(f[19]), float(f[20]), float(f[43]), float(f[50])
+        if not (0.06 <= area_r <= 0.80):
             continue
-        if bw > 0.75 * r0 or bh > 0.75 * r0:
+        if s_mean < 75 or b_mean > 118:          # purple colour gate
             continue
-        aspect = bw / (bh + 1e-6)
-        if aspect < 0.25 or aspect > 4.0:
+        if s_std < 16 or gray_std < 5:            # granular-texture gate
             continue
-        pix = labels[y:y + bh, x:x + bw] == i
-        crop = pix.astype(np.uint8) * 255
-        contours, _ = cv2.findContours(crop, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        circ = 0.0
-        if contours:
-            cnt = max(contours, key=cv2.contourArea)
-            contour_area = cv2.contourArea(cnt)
-            perimeter = cv2.arcLength(cnt, True)
-            circ = 4 * math.pi * contour_area / (perimeter * perimeter + 1e-9) if perimeter else 0.0
         if circ < min_circularity:
             continue
-        mean_b = float(B[y:y + bh, x:x + bw][pix].mean())
-        mean_s = float(S[y:y + bh, x:x + bw][pix].mean())
-        if not (mean_b < 145 and mean_s > 45):
-            continue
-        cx, cy = cent[i]
-        pad = int(max(5, 0.55 * max(bw, bh)))
-        score = circ + area / (r0 * r0)
-        boxes.append([2, max(0, x - pad), max(0, y - pad), min(w, x + bw + pad), min(h, y + bh + pad), score])
-    return merge_by_center(boxes, 0.42 * r0)
+        cx = (b[1] + b[3]) / 2
+        cy = (b[2] + b[4]) / 2
+        score = s_std + 10 * area_r
+        out.append([2, max(0, cx - half), max(0, cy - half), min(w, cx + half), min(h, cy + half), score])
+    return merge_by_center(out, 0.55 * r0)
 
 
 def load_platelet_model(model_path: str):
