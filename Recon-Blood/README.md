@@ -16,7 +16,7 @@
 | 演算法限制 | 禁止使用深度學習（YOLO、CNN 等） |
 | 繳交方式 | Colab 連結（或 `.ipynb` 檔案）+ 現場 Demo |
 | Demo 時間 | 每人 3 分鐘 |
-| 檔案上傳截止日期 | 第 16 週課程結束前（6/10 11:50 AM） |
+| 檔案上傳截止日期 | 第 16 週課程結束前（6/11 11:50 AM） |
 
 請同學依以下指標為主作為演算法評分依據：
 - Precision
@@ -24,6 +24,61 @@
 - F1 score
 
 並確保程式能夠選定圖片，同時顯示 Ground Truth 與預測結果(預測框)。
+本專案為演算法導向，非深度學習訓練流程，因此同學可直接處理全部 1260 張圖片，不需依 train/val/test 進行模型訓練與驗證。
+
+### 針對指標、參數與資料集說明
+
+Ground Truth(也就是標註答案)：位於資料集的labels中，與images中的圖片檔名一一對應，其中資料格式經過正規化，因此需要額外處理
+
+1 0.750435 0.345217 0.203478 0.248696
+類別 x軸中心 y軸中心 寬 高
+
+以下為範例處理，將資料轉化為框，提供結果顯示與IoU計算，同學需自行補全如邊界裁切等。
+```
+xmin = round((center_x - width / 2) * image_width)
+ymin = round((center_y - height / 2) * image_height)
+xmax = round((center_x + width / 2) * image_width)
+ymax = round((center_y + height / 2) * image_height)
+```
+
+IoU：面積交集/面積聯集，程式判斷後須轉化成方框，與資料集的面積進行計算，得出分數，作為是否判斷成功之依據，以下提供範例：
+```
+#格式為[xmin, ymin, xmax, ymax]
+# boxA = [x1A, y1A, x2A, y2A]
+# boxB = [x1B, y1B, x2B, y2B]
+#左上角交集
+x_left = max(x1A, x1B)
+y_top = max(y1A, y1B)
+#右下角交集
+x_right = min(x2A, x2B)
+y_bottom = min(y2A, y2B)
+#計算交集寬高
+intersection_width = max(0, x_right - x_left)
+intersection_height = max(0, y_bottom - y_top)
+#計算交集面積
+intersection_area = intersection_width * intersection_height
+#計算各自框的面積
+areaA = (x2A - x1A) * (y2A - y1A)
+areaB = (x2B - x1B) * (y2B - y1B)
+#計算聯集面積
+union_area = areaA + areaB - intersection_area
+#得到IoU分數
+IoU = intersection_area / union_area
+```
+
+經由 IoU 判斷後，同學需自行設立IoU閥值，進行類別判斷，得到：
+- TP(True Positive, 正確辨識)
+- FP(False Positive, 檢測出但該位置無Ground Truth)
+- FN(False Negative, 未檢測出來但Ground Truth存在)
+
+一個 Ground Truth 最多只能配對一個 Prediction。一個 Prediction 也最多只能配對一個 Ground Truth。
+因此需要做一對一配對，避免多個預測框同時算到同一個 Ground Truth，導致 TP 被重複計算。其中 Prediction 與 Ground Truth 必須是同一個類別，且 IoU 大於設定閾值，才可視為 TP。若類別不同，即使框重疊，也不能算入 TP。
+
+指標說明：
+Precision 為精確率，代表預測出來的結果中有多少是真的正確，其公式為 TP/(TP+FP)
+Recall 為召回率，說明所有 Ground Truth 中，成功分辨出多少，其公式為 TP/(TP+FN)
+
+於上個公告中說明到，需同時顯示 Groun Truth 與預測結果，其目的是同學能夠有辨識成功的視覺依據，若僅以數字分數分辨是否辨識成功，無法得知是否因為誤差辨識成功等原因。
 
 ## 三、評分標準
 
