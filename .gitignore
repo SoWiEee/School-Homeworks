@@ -5,3 +5,5 @@ example/
 __pycache__/
 TXL-PBC_Dataset/
 *pyc
+assets/
+samples/
