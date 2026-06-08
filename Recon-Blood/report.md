@@ -1,244 +1,140 @@
-# 血液抹片細胞偵測系統 — 開發紀錄
+# TXL-PBC 血液抹片細胞偵測報告
 
-## 資料集分析
+> 影像處理 114-2 ｜ 期末專案書面報告
+> 一個不使用深度學習的血液抹片細胞計數 Streamlit App。
 
-- 資料集：TXL-PBC_Dataset
-- 影像尺寸：575 × 575 px
-- Test 集：126 張，WBC 133個（avg 1.1/張）、RBC 1699個（avg 13.5/張）、PLT 49個（avg 0.4/張）
-- 類別標籤（YOLO 格式）：0=WBC、1=RBC、2=Platelet
-
-### GT Bounding Box 特徵統計
-
-| 細胞 | Bbox 平均面積 (px²) | 估計輪廓面積 (px²) | 估計半徑 (px) |
-|------|--------------------|--------------------|---------------|
-| WBC  | ~57,174            | ~45,000            | ~135          |
-| RBC  | ~14,250            | ~11,200            | ~60           |
-| PLT  | ~2,589             | ~2,000             | ~25           |
-
-### GT 像素值分析（bbox 內統計）
-
-| 細胞 | 灰階 gmin 中位數 | 灰階 gmed 中位數 | HSV H 中位數 | HSV S 中位數 |
-|------|-----------------|-----------------|--------------|--------------|
-| WBC  | 36              | 139             | 137          | 85           |
-| RBC  | 134             | 170             | 146*         | 53           |
-| PLT  | 59              | 198             | 50           | 51           |
-
-\* RBC 的 H 值呈雙峰分布：H=0-20（紅粉色）與 H=155-180（環繞紅色）。
+本報告與目前程式碼（`blood_cell_detector.py`、`app.py`、`txl_pbc_improved_cv.py`）同步，
+實驗數據由 `txl_pbc_improved_cv.py` 實際執行重現（見第三節）。
 
 ---
 
-## 演算法設計與迭代優化
-
-### Pipeline 架構
+## 一、Pipeline 架構
 
 ```
-輸入影像 (BGR)
+輸入 RGB 影像
     │
-    ├─[Step 1] WBC 偵測
-    │   灰階 → GaussianBlur(11×11) → threshold(gray < 130) AND purple HSV mask
-    │   → morphClose(23×23) → morphOpen(9×9) → 篩選輪廓面積 > 9500 px²
-    │   → 建立 WBC 排除區（bbox + 65px pad）
-    │
-    ├─[Step 2] RBC 偵測 (Hough Circles)
-    │   灰階 → GaussianBlur(5×5) → HoughCircles(dp=1, minDist=38, param2=12, r=28-78)
-    │   → 排除 WBC 區域內的圓 → 建立 RBC 排除圓
-    │
-    └─[Step 3] PLT 偵測 (紫色色彩遮罩)
-        HSV purple mask (H=112-162, S>38, V<210)
-        → 排除 WBC 與 RBC 區域
-        → morphOpen(2×2) → morphClose(4×4)
-        → 篩選輪廓面積 400-3000 px²
+    ├─ 灰階 Grayscale
+    ├─ 高斯模糊 Gaussian Blur
+    ├─ 自適應二值化 Adaptive Thresholding
+    ├─ 形態學閉運算 + 開運算 Morphological Closing & Opening
+    ├─ 輪廓抽取 Contour extraction
+    ├─ 面積 / 圓形度 / 長寬比 / 顏色 規則篩選
+    ├─（選用）Distance Transform + Watershed
+    └─ 計數 WBC / RBC / Platelet 並繪製方框
 ```
 
----
-
-## 迭代優化歷程
-
-### 版本 1 — 初始嘗試（全部失敗）
-
-**策略**：灰階 adaptive threshold → 輪廓面積分類
-
-| 細胞 | GT  | 預測 | 誤差      | 狀態 |
-|------|-----|------|-----------|------|
-| WBC  | 133 | 87   | −34.6%    | FAIL |
-| RBC  | 1699 | 165 | −90.3%   | FAIL |
-| PLT  | 49  | 2544 | +5091.8% | FAIL |
-
-**問題分析**：
-- WBC：threshold=100 太嚴，遺漏許多細胞核
-- RBC：blockSize=51 的 adaptive threshold 無法有效偵測粉紅色 RBC
-- PLT：小輪廓面積範圍（80-1200 px）捕捉了大量影像雜訊
+所有尺寸門檻都以「由影像解析度估計的 RBC 半徑 `r0`」為基準動態縮放
+（`shape_rbc_radius()`，例如 575×575 → `r0=65px`），不偷看標註答案，
+因此固定參數即可在不同解析度影像上通用。
 
 ---
 
-### 版本 2 — 導入 Hough Circles 偵測 RBC
+## 二、演算法摘要
 
-**策略改變**：
-- WBC：保留灰階閾值法，min_area=18000
-- RBC：改用 HoughCircles（param2=25, r=30-80）
-- PLT：改用 HSV 紫色遮罩
+### WBC 偵測（`detect_wbc`）
 
-| 細胞 | GT  | 預測 | 誤差    | 狀態 |
-|------|-----|------|---------|------|
-| WBC  | 133 | 48   | −63.9%  | FAIL |
-| RBC  | 1699 | 739 | −56.5% | FAIL |
-| PLT  | 49  | 722  | +1373%  | FAIL |
+將影像轉到 **HSV 與 LAB** 兩個色彩空間，分割出被染成紫／紫羅蘭色的細胞核區域
+（`A>145` 偏紅、`B<125` 偏藍 → 紫色），以膨脹（dilation）把破碎的細胞核合併成一團，
+再用「幾何夠大（邊界框 > 1.05·r0）」與「顏色統計（夠藍/夠飽和）」雙重規則篩選候選，
+最後以中心距離 NMS 去重。
 
-**問題分析**：
-- WBC：WBC_MIN_AREA=18000 太大，遺漏許多 WBC（最小 bbox 僅 8092 px²）
-- RBC：param2=25 太嚴格，Hough 遺漏了大量圓形
-- PLT：紫色遮罩範圍過寬（H=110-165, S>30）
+### RBC 偵測（`detect_rbc_rule` / `detect_rbc_adaptive`）
 
----
+灰階 → 高斯模糊 → 自適應二值化（block size 由 `r0` 推算）→ 形態學閉/開運算 →
+`findContours` 抽輪廓，再用**面積、圓形度（4πA/P²）、長寬比、以及由解析度推得的 RBC 半徑**
+四道規則篩選；同時排除中心落在紫色區內的輪廓，避免把 WBC 誤判成 RBC。
 
-### 版本 3 — 像素值分析後重新校準
+### 血小板偵測（兩種模式）
 
-**關鍵發現（analyze.py 分析）**：
-- 所有 WBC 的 gmin（bbox 內最暗像素）< 130
-- RBC 中心灰階值差異極大（93-230），但 H 值呈雙峰
-- PLT bbox 面積較小（294-11990 px²）且顏色高度不均一（部分粉色、部分紫色）
+- **Rule-only**（`detect_platelets_rule`）：以寬鬆紫色遮罩取小面積連通元件，
+  再用面積 / 圓形度 / 顏色規則篩選。
+- **Improved classical**（`detect_platelets_ml`，預設）：使用相同的高召回候選抽取，
+  接著對每個候選抽取 **手工特徵**（形狀、顏色、局部脈絡：面積比、長寬比、extent、
+  圓形度、solidity、位置、局部紫色比例，以及 H/S/V/L/A/B/灰階 7 通道統計量），
+  餵入 **ExtraTreesClassifier** 輸出機率後以門檻過濾。
+  這是傳統機器學習，**不使用 CNN、YOLO、U-Net 或任何神經網路**。
 
-**策略改變**：
-- WBC：threshold=130（確保全部 WBC 都有核心像素被捕捉）+ purple HSV AND mask（防止合併深色 RBC 叢）
-- RBC：param2=10，minDist=38（更積極的偵測）
-- PLT：縮小紫色遮罩範圍並加入面積篩選
+### Watershed（重疊細胞切分，加分項）
 
-| 細胞 | GT  | 預測 | 誤差    | 狀態 |
-|------|-----|------|---------|------|
-| WBC  | 133 | 142  | +6.8%   | OK   |
-| RBC  | 1699 | 1849 | +8.8%  | OK   |
-| PLT  | 49  | 143  | +191.8% | FAIL |
-
-**WBC 與 RBC 達標，PLT 仍過多偵測。**
+由前景遮罩計算 Distance Transform，取局部峰值作為 marker，再以 watershed 分割切開
+相鄰、黏合的 RBC 區域。Streamlit App 會顯示此階段，並可選擇將 watershed 候選
+補充進 RBC 計數（預設關閉，因純 watershed 在此資料集容易過度切分）。
 
 ---
 
-### 版本 4 — PLT 精細化（最終結果）
+## 三、實驗結果
 
-**PLT 問題根源**：
-- 紫色遮罩捕捉到 WBC 細胞質碎片（位於排除區外）
-- 小面積雜訊（area < 400 px²）佔多數假陽性
-- 低飽和度的紫色區塊多為非 PLT 物質
+評估規則（`txl_pbc_improved_cv.py`）：採一對一貪婪配對，預測框中心落在「同類別」
+GT 框內（含 15% 邊界容差）即視為 TP，一個 GT 只能配一個預測。
 
-**修正策略**：
-- 增加 WBC_PAD 至 65px（排除更多 WBC 細胞質）
-- 提高 PLT_MIN_AREA 至 400 px²（排除雜訊碎片）
-- 提高 PLT_PURP_S_MIN 至 38（要求更純的紫色）
+### Test 集（126 張，improved classical 模式）
 
-**最終結果（test 集）**：
+| 類別 | TP | FP | FN | Precision | Recall | F1 |
+|------|----|----|----|-----------|--------|------|
+| WBC       | 104  | 8   | 29  | 92.86% | 78.20% | 84.90% |
+| RBC       | 1200 | 428 | 499 | 73.71% | 70.63% | 72.14% |
+| Platelet  | 43   | 2   | 6   | 95.56% | 87.76% | 91.49% |
+| **micro** | 1347 | 438 | 534 | 75.46% | 71.61% | 73.49% |
 
-| 細胞 | GT  | 預測 | 誤差   | 狀態 |
-|------|-----|------|--------|------|
-| WBC  | 133 | 142  | +6.8%  | OK   |
-| RBC  | 1699 | 1849 | +8.8% | OK   |
-| PLT  | 49  | 57   | +16.3% | OK   |
+三個類別在 test 集的 Precision、Recall、F1 皆達 70% 門檻。
 
-**跨分割泛化驗證**：
+### Val 集（252 張，improved classical 模式）
 
-| Split | Images | WBC 誤差 | RBC 誤差 | PLT 誤差 |
-|-------|--------|----------|----------|----------|
-| test  | 126    | +6.8%    | +8.8%    | +16.3%   |
-| val   | 252    | +15.2%   | +6.1%    | +11.6%   |
-| train | 882    | +18.0%   | +2.1%    | +6.8%    |
+| 類別 | TP | FP | FN | Precision | Recall | F1 |
+|------|----|----|----|-----------|--------|------|
+| WBC       | 213  | 31  | 44  | 87.30% | 82.88% | 85.03% |
+| RBC       | 2545 | 882 | 838 | 74.26% | 75.23% | 74.74% |
+| Platelet  | 93   | 9   | 19  | 91.18% | 83.04% | 86.92% |
+| **micro** | 2851 | 922 | 901 | 75.56% | 75.99% | 75.77% |
 
-**三種細胞在三個分割上均達到 ±30% 誤差標準。**
+### 重現方式
 
----
-
-## Watershed + Distance Transform 重疊細胞切分
-
-### 問題動機
-
-血液抹片中 RBC 常緊密聚集，相鄰兩顆 RBC 的邊界在影像上幾乎連在一起（視覺上「黏合」）。Watershed 演算法能沿著強度谷底（兩細胞交界的暗線）切開這條邊界，以黃色視覺化顯示每顆 RBC 的真實輪廓邊界。
-
-### 設計選擇：Hough-seeded Watershed
-
-RBC 的雙凹（biconcave disc）形態造成 adaptive threshold 後呈現環形輪廓，Distance Transform 在環形內部產生的峰值過少，若以 Distance Transform 峰值作為種子，種子數量遠少於實際 RBC 數量（測試：RBC 誤差 −86.5%）。
-
-解決方案：**用 Hough Circle 的圓心作為 Watershed 種子**。
-
-- Hough 已精確找到每顆 RBC 的圓心（包含重疊的圓）→ 種子數量等於 Hough 計數
-- Watershed 從這些種子向外生長，沿強度谷底切開重疊邊界
-- 計數仍由 Hough 決定（精確），Watershed 提供真實的細胞分割邊界（視覺化）
-
-### 演算法流程
-
-```
-Hough 已知圓心 (cx, cy, r) × N顆
-    │
-灰階影像
-    │
-    ├─ GaussianBlur(5×5)
-    │
-    ├─ Adaptive Threshold(31, 5) → BINARY_INV
-    │    排除 WBC 區域（bitwise_and with NOT wbc_excl）
-    │
-    ├─ morphClose(18×18)  ← 填滿 RBC 雙凹圓盤中心
-    │
-    ├─ dilate(3×3, iter=3) → sure_bg（確定背景，markers=1）
-    │
-    ├─ 建立 markers 陣列：
-    │    sure_bg == 0 → markers = 1（確定背景）
-    │    對每個 Hough 圓心畫種子圓（半徑 = max(3, r//4)）
-    │         → markers = i+2（第 i 顆 RBC 的種子）
-    │
-    ├─ cv2.watershed(img_bgr, markers)
-    │    從每個種子向外生長，碰撞邊界 → markers = -1
-    │
-    └─ result[markers == -1] = [0, 220, 220]（黃色邊界線）
+```bash
+python txl_pbc_improved_cv.py --root TXL-PBC_Dataset/TXL-PBC \
+    --split test --platelet-model et_platelet_model.pkl
 ```
 
-### 視覺效果
-
-結果影像中黃色細線為 Watershed 分割邊界，直觀顯示：
-- 重疊的 RBC 群之間出現切割線，清楚顯示每顆細胞的邊界
-- 種子數量由 Hough 保證，Watershed 僅找邊界，不影響計數準確度
-
-### 關鍵參數
-
-| 參數 | 值 | 說明 |
-|------|----|------|
-| `WS_CLOSE_K` | 18 | 填滿 RBC 雙凹中心的 closing kernel |
-| 種子半徑 | `max(3, r//4)` | Hough 半徑的 1/4，確保種子在細胞中心不重疊 |
-| 確定背景 | `dilate(3×3, iter=3)` | 略大於 RBC 的背景區域 |
+> 以上數據已於本機實際執行重現，與 `reports/test_metrics.csv`、`reports/val_metrics.csv` 一致。
 
 ---
 
-## 最終參數設定
+## 四、範例疊圖
 
-```python
-# WBC
-WBC_GRAY_THRESH = 130
-WBC_CLOSE_K     = 23
-WBC_OPEN_K      = 9
-WBC_MIN_AREA    = 9500  # px²
-WBC_PAD         = 65    # px
+`reports/TXL_PBC_Classical_CV_Report.pdf` 第 4 節提供一張範例疊圖
+（亦見 `assets/overlay_example.jpg`）：
 
-# RBC (Hough Circles)
-RBC_MIN_DIST = 38
-RBC_PARAM1   = 50
-RBC_PARAM2   = 12
-RBC_MIN_R    = 28       # px
-RBC_MAX_R    = 78       # px
-
-# PLT (purple HSV mask)
-PLT_PURP_H_LO  = 112
-PLT_PURP_H_HI  = 162
-PLT_PURP_S_MIN = 38
-PLT_PURP_V_HI  = 210
-PLT_MIN_AREA   = 400    # px²
-PLT_MAX_AREA   = 3000   # px²
-```
-
+- 綠框 / 紅框 / 藍框：RBC、Platelet、WBC 的 Ground Truth。
+- App 中以 `GT:WBC`、`Pred:WBC` 形式同時標註 GT 與預測，提供辨識成功的視覺依據。
 
 ---
 
-## 困難案例分析
+## 五、困難案例與限制
 
-1. **WBC 細胞核偏移**：部分 WBC 的 bbox 中心落在細胞質（而非細胞核），導致中心像素灰階值高達 180-220。解法：使用較高的灰階閾值（130）並結合形態學 closing 合併細胞核碎片。
+| 案例 | 困難點 | 本專案的緩解方式 |
+|------|--------|------------------|
+| RBC 重疊 | 輪廓合併成一大塊，純面積計數會低估細胞數 | 提供 Distance Transform + Watershed 作為視覺化與選用的計數補充 |
+| 血小板貼近 WBC 核 | 小型紫色元件易與 WBC 細胞核碎片混淆 | improved classical 模式用局部脈絡手工特徵 + ExtraTrees 分類 |
+| 染色變異 | 固定 HSV/LAB 門檻可能漏掉淡染細胞或誤收染色雜質 | 同時使用 HSV 與 LAB 規則，並透過 UI 參數間接調整門檻 |
+| 標註模糊 | 部分小紫色元件外觀像血小板但未被標註 | 並排顯示 GT 與預測，讓假陽性在 Demo 時清楚可見 |
 
-2. **RBC 堆疊重疊**：緊密相鄰的 RBC 使 Hough Circles 難以區分個別圓。解法：使用適當的 minDist=38 與 param2=12 平衡召回率與精確率。
+---
 
-3. **PLT 顏色不均一**：約 47% 的 PLT 呈粉紅色（H=0-25，與 RBC 相近），另 53% 呈紫色。粉紅色 PLT 難以從 RBC 邊緣碎片中辨別，目前僅透過紫色遮罩捕捉後者。
+## 六、Streamlit App UI 檢查表
 
-4. **偵測耦合效應**：WBC 排除區大小直接影響 RBC 偵測數量。WBC_PAD 增大 → RBC 排除更多 → RBC 漏偵測。需要在 WBC_PAD 與 RBC 召回率之間取得平衡。
+| 要求 | 在 App 中的位置 |
+|------|-----------------|
+| train / val / test 影像選擇 | 側欄 split 選擇器與影像下拉選單 |
+| Ground Truth vs Prediction | 並排面板，標籤採 `GT:WBC`、`Pred:RBC` 形式 |
+| 至少一個可調參數 | Gaussian kernel、adaptive C、closing kernel、圓形度門檻、血小板門檻 |
+| Pipeline 視覺化 | 主頁 pipeline 區塊顯示灰階、高斯模糊、自適應二值化、形態學閉運算等 |
+| 下載按鈕 | 疊圖 PNG、預測框 CSV、計數誤差 CSV |
+
+---
+
+## 七、建議 Demo 流程
+
+1. 選擇 test split 與下拉選單中的一張影像。
+2. 展示 pipeline 區塊，指出灰階、高斯模糊、自適應二值化、形態學閉運算各階段。
+3. 展示並排的 Ground Truth 與 Prediction 面板，確認標籤為 `GT:WBC`、`Pred:WBC` 形式。
+4. 在較擁擠的影像上勾選 Watershed RBC supplementation，示範重疊細胞切分。
+5. 下載疊圖 PNG 或 CSV，示範匯出功能。
