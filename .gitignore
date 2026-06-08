@@ -1,3 +1,7 @@
 .claude/
 CLAUDE.md
 *.exe
+example/
+__pycache__/
+TXL-PBC_Dataset/
+*pyc
