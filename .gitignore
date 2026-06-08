@@ -4,6 +4,7 @@ CLAUDE.md
 example/
 __pycache__/
 TXL-PBC_Dataset/
+TXL-PBC_Dataset.zip
 *pyc
 assets/
 samples/
