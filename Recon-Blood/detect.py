@@ -25,7 +25,7 @@ WBC_COLOR_FALLBACK_PAD = 45
 # ── RBC (Hough Circles) ───────────────────────────────────────────────────────
 RBC_MIN_DIST = 38
 RBC_PARAM1   = 50
-RBC_PARAM2   = 15
+RBC_PARAM2   = 13
 RBC_MIN_R    = 28
 RBC_MAX_R    = 78
 RBC_BOX_PAD  = 0
