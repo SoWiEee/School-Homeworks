@@ -30,9 +30,9 @@ PLT_V_HI     = 210
 PLT_MIN_AREA = 400
 PLT_MAX_AREA = 3000
 
-# ── Watershed (visualization only) ───────────────────────────────────────────
-WS_CLOSE_K     = 18
-WS_DIST_THRESH = 0.40
+# ── Evaluation ────────────────────────────────────────────────────────────────
+IOU_THRESH = 0.5
+IMG_SIZE   = 575
 
 
 def _hough_seeded_watershed(img_bgr, rbc_centers, h, w):
@@ -41,7 +41,6 @@ def _hough_seeded_watershed(img_bgr, rbc_centers, h, w):
     adjacent circles, then lets Watershed find boundaries between touching RBCs.
     Returns ws_markers (-1 = boundary pixels).
     """
-    # Draw filled Hough circles; dilate to connect adjacent cells
     cell_mask = np.zeros((h, w), np.uint8)
     for (cx, cy, r) in rbc_centers:
         cv2.circle(cell_mask, (cx, cy), r, 255, -1)
@@ -61,11 +60,12 @@ def _hough_seeded_watershed(img_bgr, rbc_centers, h, w):
 
 def detect_cells(img_bgr):
     """
-    Returns (wbc_count, rbc_count, plt_count, debug_img).
+    Returns (wbc_boxes, rbc_boxes, plt_boxes, debug_img).
+    Each *_boxes is a list of [x1, y1, x2, y2] pixel coords.
 
     Step 1: WBC  — gray threshold + purple HSV → large contours
     Step 2: RBC  — Hough Circle Transform (counting)
-              +  Watershed + Distance Transform (boundary visualization)
+              +  Hough-seeded Watershed (boundary visualization)
     Step 3: PLT  — purple HSV mask
     """
     h, w = img_bgr.shape[:2]
@@ -126,80 +126,170 @@ def detect_cells(img_bgr):
     plt_dets = [c for c in plt_cnts_all
                 if PLT_MIN_AREA <= cv2.contourArea(c) <= PLT_MAX_AREA]
 
+    # ── Collect bounding boxes ─────────────────────────────────────────
+    wbc_boxes = []
+    for cnt in wbc_cnts:
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        wbc_boxes.append([x, y, x + bw, y + bh])
+
+    rbc_boxes = []
+    for (cx, cy, r) in rbc_centers:
+        rbc_boxes.append([max(0, cx - r), max(0, cy - r),
+                          min(w, cx + r), min(h, cy + r)])
+
+    plt_boxes = []
+    for cnt in plt_dets:
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        plt_boxes.append([x, y, x + bw, y + bh])
+
     # ── Debug visualization ────────────────────────────────────────────
     debug = img_bgr.copy()
     boundary = (ws_markers == -1).astype(np.uint8)
     boundary = cv2.dilate(boundary, np.ones((2, 2), np.uint8), iterations=1)
     debug[boundary > 0] = [0, 220, 220]  # Watershed boundaries in yellow (thickened)
-    for cnt in wbc_cnts:
-        x, y, bw, bh = cv2.boundingRect(cnt)
-        cv2.rectangle(debug, (x, y), (x + bw, y + bh), (0, 200, 0), 2)
-        cv2.putText(debug, "WBC", (x, max(0, y - 5)),
+
+    for box in wbc_boxes:
+        x1, y1, x2, y2 = box
+        cv2.rectangle(debug, (x1, y1), (x2, y2), (0, 200, 0), 2)
+        cv2.putText(debug, "WBC", (x1, max(0, y1 - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1)
     for (cx, cy, r) in rbc_centers:
         cv2.circle(debug, (cx, cy), r, (0, 0, 220), 1)
-    for cnt in plt_dets:
-        x, y, bw, bh = cv2.boundingRect(cnt)
-        cv2.rectangle(debug, (x, y), (x + bw, y + bh), (220, 0, 0), 1)
+    for box in plt_boxes:
+        x1, y1, x2, y2 = box
+        cv2.rectangle(debug, (x1, y1), (x2, y2), (220, 0, 0), 1)
 
-    return len(wbc_cnts), len(rbc_centers), len(plt_dets), debug
+    return wbc_boxes, rbc_boxes, plt_boxes, debug
 
 
-def load_gt(label_path):
-    wbc = rbc = plt = 0
+def load_gt(label_path, img_w=IMG_SIZE, img_h=IMG_SIZE):
+    """Parse YOLO format labels. Returns {0: [[x1,y1,x2,y2],...], 1:[...], 2:[...]}"""
+    boxes = {0: [], 1: [], 2: []}
     if not os.path.exists(label_path):
-        return wbc, rbc, plt
+        return boxes
     with open(label_path) as f:
         for line in f:
-            cls = int(line.split()[0])
-            if cls == 0:   wbc += 1
-            elif cls == 1: rbc += 1
-            elif cls == 2: plt += 1
-    return wbc, rbc, plt
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            cls = int(parts[0])
+            cx, cy, bw, bh = map(float, parts[1:5])
+            x1 = round((cx - bw / 2) * img_w)
+            y1 = round((cy - bh / 2) * img_h)
+            x2 = round((cx + bw / 2) * img_w)
+            y2 = round((cy + bh / 2) * img_h)
+            if cls in boxes:
+                boxes[cls].append([x1, y1, x2, y2])
+    return boxes
 
 
-def evaluate(split="test", verbose=False):
+def iou(boxA, boxB):
+    x_left   = max(boxA[0], boxB[0])
+    y_top    = max(boxA[1], boxB[1])
+    x_right  = min(boxA[2], boxB[2])
+    y_bottom = min(boxA[3], boxB[3])
+    inter = max(0, x_right - x_left) * max(0, y_bottom - y_top)
+    if inter == 0:
+        return 0.0
+    area_a = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    area_b = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+    return inter / (area_a + area_b - inter)
+
+
+def match_detections(gt_boxes, pred_boxes, iou_thresh=IOU_THRESH):
+    """Greedy one-to-one IoU matching. Returns (tp, fp, fn)."""
+    matched_gt   = set()
+    matched_pred = set()
+    pairs = []
+    for i, gb in enumerate(gt_boxes):
+        for j, pb in enumerate(pred_boxes):
+            score = iou(gb, pb)
+            if score >= iou_thresh:
+                pairs.append((score, i, j))
+    pairs.sort(reverse=True)
+    for _, i, j in pairs:
+        if i not in matched_gt and j not in matched_pred:
+            matched_gt.add(i)
+            matched_pred.add(j)
+    tp = len(matched_gt)
+    fp = len(pred_boxes) - len(matched_pred)
+    fn = len(gt_boxes)   - len(matched_gt)
+    return tp, fp, fn
+
+
+def draw_gt_pred(img_bgr, gt_by_cls, pred_by_cls):
+    """Draw GT (thin) and predicted (thick) bounding boxes on image."""
+    GT_COLORS   = {0: (0, 230, 0),   1: (230, 180, 0), 2: (200, 0, 200)}
+    PRED_COLORS = {0: (0, 200, 0),   1: (0, 0, 220),   2: (220, 0, 0)}
+    NAMES = {0: 'WBC', 1: 'RBC', 2: 'PLT'}
+    vis = img_bgr.copy()
+    for cls, boxes in gt_by_cls.items():
+        c = GT_COLORS[cls]
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            cv2.rectangle(vis, (x1, y1), (x2, y2), c, 1)
+    for cls, boxes in pred_by_cls.items():
+        c = PRED_COLORS[cls]
+        name = NAMES[cls]
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            cv2.rectangle(vis, (x1, y1), (x2, y2), c, 2)
+            cv2.putText(vis, name, (x1, max(0, y1 - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, c, 1)
+    return vis
+
+
+def evaluate(split="test", iou_thresh=IOU_THRESH, verbose=False, save_vis_dir=None):
     img_dir   = f"TXL-PBC_Dataset/TXL-PBC/images/{split}"
     label_dir = f"TXL-PBC_Dataset/TXL-PBC/labels/{split}"
     img_files = sorted(glob.glob(f"{img_dir}/*.png"))
 
-    gt_wbc = gt_rbc = gt_plt = 0
-    pr_wbc = pr_rbc = pr_plt = 0
+    totals = {cls: {"tp": 0, "fp": 0, "fn": 0} for cls in [0, 1, 2]}
 
     for img_path in img_files:
         stem = os.path.splitext(os.path.basename(img_path))[0]
         lbl  = f"{label_dir}/{stem}.txt"
         img  = cv2.imread(img_path)
-        w_gt, r_gt, p_gt = load_gt(lbl)
-        w_pr, r_pr, p_pr, _ = detect_cells(img)
+        gt   = load_gt(lbl)
+        wbc_boxes, rbc_boxes, plt_boxes, debug = detect_cells(img)
+        pred = {0: wbc_boxes, 1: rbc_boxes, 2: plt_boxes}
 
-        gt_wbc += w_gt; gt_rbc += r_gt; gt_plt += p_gt
-        pr_wbc += w_pr; pr_rbc += r_pr; pr_plt += p_pr
+        for cls in [0, 1, 2]:
+            tp, fp, fn = match_detections(gt[cls], pred[cls], iou_thresh)
+            totals[cls]["tp"] += tp
+            totals[cls]["fp"] += fp
+            totals[cls]["fn"] += fn
 
         if verbose:
-            print(f"  {stem[:20]}  WBC {w_gt}->{w_pr}  RBC {r_gt}->{r_pr}  PLT {p_gt}->{p_pr}")
+            print(f"  {stem[:20]}  "
+                  f"WBC GT={len(gt[0])} P={len(wbc_boxes)}  "
+                  f"RBC GT={len(gt[1])} P={len(rbc_boxes)}  "
+                  f"PLT GT={len(gt[2])} P={len(plt_boxes)}")
 
-    def err(gt, pr):
-        if gt == 0:
-            return 0.0 if pr == 0 else float('inf')
-        return (pr - gt) / gt
+        if save_vis_dir:
+            os.makedirs(save_vis_dir, exist_ok=True)
+            vis = draw_gt_pred(img, gt, pred)
+            cv2.imwrite(f"{save_vis_dir}/{stem}.png", vis)
 
-    we = err(gt_wbc, pr_wbc)
-    re = err(gt_rbc, pr_rbc)
-    pe = err(gt_plt, pr_plt)
-
-    print(f"\n{'='*52}")
-    print(f"  Split: {split}   Images: {len(img_files)}")
-    print(f"{'='*52}")
-    print(f"{'Cell':<6} {'GT':>6} {'Pred':>6} {'Error':>8}  Status")
-    print(f"{'-'*52}")
-    for name, gt, pr, e in [("WBC", gt_wbc, pr_wbc, we),
-                             ("RBC", gt_rbc, pr_rbc, re),
-                             ("PLT", gt_plt, pr_plt, pe)]:
-        status = "OK" if abs(e) <= 0.30 else ("OVER" if e > 0 else "UNDER")
-        print(f"{name:<6} {gt:>6} {pr:>6} {e:>+8.1%}  {status}")
-    print(f"{'='*52}")
-    return we, re, pe
+    names = {0: "WBC", 1: "RBC", 2: "PLT"}
+    print(f"\n{'='*64}")
+    print(f"  Split: {split}  ({len(img_files)} images)  IoU≥{iou_thresh}")
+    print(f"{'='*64}")
+    print(f"{'Cell':<6} {'TP':>6} {'FP':>6} {'FN':>6} {'Precision':>10} {'Recall':>8}")
+    print(f"{'-'*64}")
+    results = {}
+    for cls in [0, 1, 2]:
+        tp   = totals[cls]["tp"]
+        fp   = totals[cls]["fp"]
+        fn   = totals[cls]["fn"]
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        name = names[cls]
+        results[name] = {"tp": tp, "fp": fp, "fn": fn,
+                         "precision": prec, "recall": rec}
+        print(f"{name:<6} {tp:>6} {fp:>6} {fn:>6} {prec:>10.1%} {rec:>8.1%}")
+    print(f"{'='*64}")
+    return results
 
 
 if __name__ == "__main__":
