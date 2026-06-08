@@ -217,17 +217,46 @@ def purple_mask_loose(img: np.ndarray):
     return purple, H, S, V, L, A, B
 
 
+def wbc_violet_mask(img: np.ndarray):
+    """Violet-hue mask tuned for WBC nuclei.
+
+    WBC nuclei are stained true violet, while RBCs (even when clustered) stay
+    pink/red. Gating on a *tight* hue window (H 120-158) and only loose
+    saturation/value lets weakly-stained pale nuclei through while keeping RBC
+    clusters out, which a saturation-first mask cannot do.
+    """
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    H, S, V = cv2.split(hsv)
+    L, A, B = cv2.split(lab)
+    violet = ((H >= 120) & (H <= 158) & (S >= 70) & (V < 232) & (A > 132) & (B < 128)).astype(np.uint8) * 255
+    violet = cv2.medianBlur(violet, 3)
+    violet = cv2.morphologyEx(violet, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    return violet, H, S, V, L, A, B
+
+
+def point_in_boxes(cx: float, cy: float, boxes: Sequence[Box]) -> bool:
+    """True if (cx, cy) lies inside any [class, x1, y1, x2, y2] box."""
+    for b in boxes:
+        if b[1] <= cx <= b[3] and b[2] <= cy <= b[4]:
+            return True
+    return False
+
+
 def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
+    """Detect WBC first, from the violet nucleus stain.
+
+    This runs before RBC / platelet detection so the resulting boxes can be used
+    to exclude those regions (a WBC must not be re-counted as RBCs or platelets).
+    """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
-    purple, H, S, V, L, A, B = purple_mask_strict(img)
-    # Keep only the solid nucleus cores. Opening removes the thin purple that some
-    # images show around RBC rims and small stain specks, so the bounding box is
-    # the WBC nucleus itself rather than a scattered cluster spanning the field.
+    violet, H, S, V, L, A, B = wbc_violet_mask(img)
+    # Keep only the solid nucleus cores. Opening removes thin/edge violet and small
+    # specks, so the bounding box is the WBC nucleus, not a scattered cluster.
     core_k = ensure_odd(int(max(3, round(r0 * 0.18))))
-    cores = cv2.morphologyEx(purple, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (core_k, core_k)))
-    # Merge the fragmented lobes of one nucleus only (small dilation, not enough
-    # to bridge separate cells).
+    cores = cv2.morphologyEx(violet, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (core_k, core_k)))
+    # Merge the fragmented lobes of one nucleus only (small dilation).
     rad = int(max(3, round(r0 * 0.20)))
     cluster = cv2.dilate(cores, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)))
     ncl, labcl, _, _ = cv2.connectedComponentsWithStats(cluster, 8)
@@ -235,7 +264,9 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
     for ci in range(1, ncl):
         region = (labcl == ci) & (cores > 0)
         original_area = int(region.sum())
-        if original_area < max(90, 0.9 * r0 * r0):
+        # A WBC nucleus is a large solid violet blob; this size gate rejects the
+        # small violet bodies that belong to platelets.
+        if original_area < max(120, 1.3 * r0 * r0):
             continue
         ys, xs = np.where(region)
         if len(xs) == 0:
@@ -243,17 +274,13 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
         x1, x2 = int(xs.min()), int(xs.max() + 1)
         y1, y2 = int(ys.min()), int(ys.max() + 1)
         bw, bh = x2 - x1, y2 - y1
-        mean_s = float(S[region].mean())
-        mean_b = float(B[region].mean())
-        mean_h = float(H[region].mean())
         large_geom = (bw > 1.05 * r0 and bh > 0.75 * r0) or (bw > 0.75 * r0 and bh > 1.05 * r0)
-        leuk_color = (mean_b < 116 and mean_h < 160) or (mean_s > 108 and mean_b < 120)
-        if large_geom and leuk_color:
+        if large_geom:
             # GT box is ~1.03x the nucleus-core bbox, so only a small pad is needed.
             pad = int(0.06 * max(bw, bh))
             score = original_area / (r0 * r0)
             boxes.append([0, max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad), score])
-    return merge_by_center(boxes, 0.90 * r0), purple
+    return merge_by_center(boxes, 0.90 * r0), violet
 
 
 def detect_rbc_rule(
@@ -264,10 +291,16 @@ def detect_rbc_rule(
     adaptive_c: int = 5,
     close_kernel: int = 5,
     min_circularity: float = 0.08,
+    wbc_boxes: Optional[Sequence[Box]] = None,
 ) -> List[Box]:
-    """RBC detector based on area, circularity and resolution-aware size rules."""
+    """RBC detector based on area, circularity and resolution-aware size rules.
+
+    Candidates whose centre falls inside an already-detected WBC box are dropped,
+    so a white blood cell is never carved up into spurious RBCs.
+    """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
+    wbc_boxes = wbc_boxes or []
     stages = preprocess_pipeline(img, gaussian_kernel, adaptive_block_ratio, adaptive_c, close_kernel)
     th = cv2.cvtColor(stages["6 Opening Cleanup"], cv2.COLOR_BGR2GRAY)
     if strict_purple is None:
@@ -296,6 +329,8 @@ def detect_rbc_rule(
             cx = m["m10"] / m["m00"]
             cy = m["m01"] / m["m00"]
         if purple_d[int(min(h - 1, max(0, cy))), int(min(w - 1, max(0, cx)))] > 0:
+            continue
+        if point_in_boxes(cx, cy, wbc_boxes):  # inside a WBC -> not an RBC
             continue
         # GT RBC boxes are ~2*r0 per side and very consistent, so bias the box
         # half-size toward r0 (the resolution-derived radius) for better IoU.
@@ -439,17 +474,23 @@ def extract_platelet_components(img: np.ndarray) -> Tuple[np.ndarray, List[Box]]
     return np.asarray(feats, dtype=np.float32), boxes
 
 
-def detect_platelets_rule(img: np.ndarray, min_circularity: float = 0.15) -> List[Box]:
+def detect_platelets_rule(
+    img: np.ndarray,
+    min_circularity: float = 0.15,
+    wbc_boxes: Optional[Sequence[Box]] = None,
+) -> List[Box]:
     """Rule-only platelet detector.
 
     Real platelets are small purple bodies with granular internal texture, so they
     are separated from uniform purple specks by saturation/grayscale *variation*
     (S std, gray std) plus colour and size gates derived on the training split.
     The boxes are given a fixed size (~0.84*r0 per side) to match the very
-    consistent platelet ground-truth boxes.
+    consistent platelet ground-truth boxes. Candidates inside a detected WBC box
+    are dropped (a WBC nucleus must not be split into platelets).
     """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
+    wbc_boxes = wbc_boxes or []
     feats, boxes = extract_platelet_components(img)
     if len(boxes) == 0:
         return []
@@ -470,6 +511,8 @@ def detect_platelets_rule(img: np.ndarray, min_circularity: float = 0.15) -> Lis
             continue
         cx = (b[1] + b[3]) / 2
         cy = (b[2] + b[4]) / 2
+        if point_in_boxes(cx, cy, wbc_boxes):    # inside a WBC -> not a platelet
+            continue
         score = s_std + 10 * area_r
         out.append([2, max(0, cx - half), max(0, cy - half), min(w, cx + half), min(h, cy + half), score])
     return merge_by_center(out, 0.55 * r0)
@@ -510,15 +553,21 @@ def detect_cells(
     rbc_min_circularity: float = 0.08,
     platelet_min_circularity: float = 0.15,
 ) -> List[Box]:
-    """Run all detectors and return unified boxes."""
+    """Run all detectors and return unified boxes.
+
+    WBC is detected first; its boxes are then used to exclude the same regions
+    from RBC and platelet detection, so a white blood cell cannot be re-counted
+    as red cells or platelets.
+    """
     h, w = img.shape[:2]
-    wbc, purple = detect_wbc(img)
-    rbc = detect_rbc_rule(img, purple, gaussian_kernel, adaptive_block_ratio, adaptive_c, close_kernel, rbc_min_circularity)
+    wbc, _violet = detect_wbc(img)
+    rbc = detect_rbc_rule(img, None, gaussian_kernel, adaptive_block_ratio, adaptive_c, close_kernel, rbc_min_circularity, wbc_boxes=wbc)
     if use_watershed:
         # Add only missing watershed candidates by center-distance merge.
-        rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in watershed_rbc_candidates(img, purple)], 0.42 * shape_rbc_radius(h, w))
+        ws = [b for b in watershed_rbc_candidates(img) if not point_in_boxes((b[1] + b[3]) / 2, (b[2] + b[4]) / 2, wbc)]
+        rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in ws], 0.42 * shape_rbc_radius(h, w))
     if mode.lower().startswith("rule"):
-        platelets = detect_platelets_rule(img, platelet_min_circularity)
+        platelets = detect_platelets_rule(img, platelet_min_circularity, wbc_boxes=wbc)
     else:
         platelets = detect_platelets_ml(img, platelet_model, platelet_threshold)
     return [clamp_box(b, w, h) for b in (wbc + rbc + platelets)]
