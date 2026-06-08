@@ -21,10 +21,14 @@ WBC_MAX_DETECTIONS = 1
 # ── RBC (Hough Circles) ───────────────────────────────────────────────────────
 RBC_MIN_DIST = 38
 RBC_PARAM1   = 50
-RBC_PARAM2   = 12
+RBC_PARAM2   = 15
 RBC_MIN_R    = 28
 RBC_MAX_R    = 78
 RBC_BOX_PAD  = 0
+RBC_AREA_MIN = 2500
+RBC_AREA_MAX = 15500
+RBC_CIRCULARITY_MIN = 0.82
+RBC_USE_COLOR_FILTER = False
 RBC_FILTER_R_MAX = 70
 RBC_FILTER_GRAY_STD_MAX = 32
 RBC_FILTER_S_MED_MAX = 110
@@ -41,6 +45,7 @@ PLT_BOX_PAD  = 18
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 IOU_THRESH = 0.3
+DRAW_WATERSHED_BOUNDARIES = False
 IMG_SIZE   = 575
 
 
@@ -128,14 +133,12 @@ def _hough_seeded_watershed(img_bgr, rbc_centers, h, w):
 
 
 def detect_cells(img_bgr):
-    """
-    Returns (wbc_boxes, rbc_boxes, plt_boxes, debug_img).
-    Each *_boxes is a list of [x1, y1, x2, y2] pixel coords.
+    """Return detected WBC/RBC/PLT boxes and a debug image.
 
-    Step 1: WBC  — gray threshold + purple HSV → large contours
-    Step 2: RBC  — Hough Circle Transform (counting)
-              +  Hough-seeded Watershed (boundary visualization)
-    Step 3: PLT  — purple HSV mask
+    The primary classification rule is area + circularity:
+    WBC uses large purple connected components, RBC uses circular Hough
+    candidates filtered by circle area, and PLT uses a conservative small
+    purple-area rule.
     """
     h, w = img_bgr.shape[:2]
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -152,9 +155,11 @@ def detect_cells(img_bgr):
     # blobs. Per-component DT Watershed handles noise via the area filter instead.
 
     wbc_raw_boxes, wbc_ws_markers = _wbc_seeded_watershed(img_bgr, dark, h, w)
+    wbc_boxes = [_pad_box(box, WBC_BOX_PAD, w, h) for box in wbc_raw_boxes]
+    wbc_boxes = sorted(wbc_boxes, key=_box_area, reverse=True)[:WBC_MAX_DETECTIONS]
 
     wbc_excl = np.zeros((h, w), np.uint8)
-    for box in wbc_raw_boxes:
+    for box in wbc_boxes:
         x1, y1, x2, y2 = box
         cv2.rectangle(wbc_excl,
                       (max(0, x1 - WBC_PAD), max(0, y1 - WBC_PAD)),
@@ -177,24 +182,28 @@ def detect_cells(img_bgr):
             y1 = max(0, int(cy - r))
             x2 = min(w, int(cx + r))
             y2 = min(h, int(cy + r))
-            roi_gray = gray[y1:y2, x1:x2]
-            roi_hsv = hsv[y1:y2, x1:x2]
-            if roi_gray.size == 0:
-                continue
-            gray_std = float(roi_gray.std())
-            s_med = float(np.median(roi_hsv[:, :, 1]))
-            v_med = float(np.median(roi_hsv[:, :, 2]))
+            area = np.pi * (r ** 2)
+            circularity = 1.0  # Hough circles are circular candidates by construction.
             is_rbc_like = (
-                r <= RBC_FILTER_R_MAX and
-                gray_std <= RBC_FILTER_GRAY_STD_MAX and
-                s_med <= RBC_FILTER_S_MED_MAX and
-                v_med <= RBC_FILTER_V_MED_MAX
+                RBC_AREA_MIN <= area <= RBC_AREA_MAX and
+                circularity >= RBC_CIRCULARITY_MIN
             )
+            if RBC_USE_COLOR_FILTER:
+                roi_gray = gray[y1:y2, x1:x2]
+                roi_hsv = hsv[y1:y2, x1:x2]
+                if roi_gray.size == 0:
+                    continue
+                gray_std = float(roi_gray.std())
+                s_med = float(np.median(roi_hsv[:, :, 1]))
+                v_med = float(np.median(roi_hsv[:, :, 2]))
+                is_rbc_like = is_rbc_like and (
+                    r <= RBC_FILTER_R_MAX and
+                    gray_std <= RBC_FILTER_GRAY_STD_MAX and
+                    s_med <= RBC_FILTER_S_MED_MAX and
+                    v_med <= RBC_FILTER_V_MED_MAX
+                )
             if wbc_excl[cy_c, cx_c] == 0 and is_rbc_like:
                 rbc_centers.append((int(cx), int(cy), int(r)))
-
-    # ── Step 2b: Hough-seeded Watershed boundary visualization ─────────
-    ws_markers = _hough_seeded_watershed(img_bgr, rbc_centers, h, w)
 
     # ── Step 3: PLT ────────────────────────────────────────────────────
     rbc_excl = np.zeros((h, w), np.uint8)
@@ -212,9 +221,6 @@ def detect_cells(img_bgr):
                 if PLT_MIN_AREA <= cv2.contourArea(c) <= PLT_MAX_AREA]
 
     # ── Collect bounding boxes ─────────────────────────────────────────
-    wbc_boxes = [_pad_box(box, WBC_BOX_PAD, w, h) for box in wbc_raw_boxes]
-    wbc_boxes = sorted(wbc_boxes, key=_box_area, reverse=True)[:WBC_MAX_DETECTIONS]
-
     rbc_boxes = []
     for (cx, cy, r) in rbc_centers:
         rbc_boxes.append(_pad_box([max(0, cx - r), max(0, cy - r),
@@ -229,15 +235,10 @@ def detect_cells(img_bgr):
     # ── Debug visualization ────────────────────────────────────────────
     debug = img_bgr.copy()
 
-    # WBC Watershed boundaries (magenta)
-    wbc_boundary = (wbc_ws_markers == -1).astype(np.uint8)
-    wbc_boundary = cv2.dilate(wbc_boundary, np.ones((2, 2), np.uint8), iterations=1)
-    debug[wbc_boundary > 0] = [200, 0, 200]
-
-    # RBC Watershed boundaries (yellow)
-    rbc_boundary = (ws_markers == -1).astype(np.uint8)
-    rbc_boundary = cv2.dilate(rbc_boundary, np.ones((2, 2), np.uint8), iterations=1)
-    debug[rbc_boundary > 0] = [0, 220, 220]
+    if DRAW_WATERSHED_BOUNDARIES:
+        wbc_boundary = (wbc_ws_markers == -1).astype(np.uint8)
+        wbc_boundary = cv2.dilate(wbc_boundary, np.ones((2, 2), np.uint8), iterations=1)
+        debug[wbc_boundary > 0] = [200, 0, 200]
 
     for box in wbc_boxes:
         x1, y1, x2, y2 = box
