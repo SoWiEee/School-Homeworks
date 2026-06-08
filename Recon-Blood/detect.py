@@ -17,6 +17,10 @@ WBC_MIN_AREA    = 1000
 WBC_PAD         = 20
 WBC_BOX_PAD     = 35
 WBC_MAX_DETECTIONS = 1
+WBC_COLOR_FALLBACK_THRESH = 150
+WBC_COLOR_FALLBACK_MIN_AREA = 4000
+WBC_COLOR_FALLBACK_MAX_AREA = 80000
+WBC_COLOR_FALLBACK_PAD = 45
 
 # ── RBC (Hough Circles) ───────────────────────────────────────────────────────
 RBC_MIN_DIST = 38
@@ -109,6 +113,33 @@ def _wbc_seeded_watershed(img_bgr, dark_mask, h, w):
     return boxes, markers
 
 
+def _wbc_color_block_boxes(gray, hsv, h, w):
+    """Fallback WBC detector for irregular WBC shapes missed by watershed seeds."""
+    g_blur = cv2.GaussianBlur(gray, (11, 11), 2)
+    _, dark = cv2.threshold(
+        g_blur, WBC_COLOR_FALLBACK_THRESH, 255, cv2.THRESH_BINARY_INV
+    )
+    purple = cv2.inRange(hsv, (95, 20, 20), (172, 255, 220))
+    mask = cv2.bitwise_and(dark, purple)
+    mask = cv2.morphologyEx(
+        mask, cv2.MORPH_CLOSE, np.ones((WBC_CLOSE_K, WBC_CLOSE_K), np.uint8)
+    )
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+    boxes = []
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in cnts:
+        area = cv2.contourArea(cnt)
+        if not (WBC_COLOR_FALLBACK_MIN_AREA <= area <= WBC_COLOR_FALLBACK_MAX_AREA):
+            continue
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        aspect = bw / max(1, bh)
+        if 0.45 <= aspect <= 2.2:
+            boxes.append(_pad_box([x, y, x + bw, y + bh],
+                                  WBC_COLOR_FALLBACK_PAD, w, h))
+    return sorted(boxes, key=_box_area, reverse=True)[:WBC_MAX_DETECTIONS]
+
+
 def _hough_seeded_watershed(img_bgr, rbc_centers, h, w):
     """
     Hough-seeded Watershed: draws Hough circles as cell regions, dilates to connect
@@ -157,6 +188,8 @@ def detect_cells(img_bgr):
     wbc_raw_boxes, wbc_ws_markers = _wbc_seeded_watershed(img_bgr, dark, h, w)
     wbc_boxes = [_pad_box(box, WBC_BOX_PAD, w, h) for box in wbc_raw_boxes]
     wbc_boxes = sorted(wbc_boxes, key=_box_area, reverse=True)[:WBC_MAX_DETECTIONS]
+    if not wbc_boxes:
+        wbc_boxes = _wbc_color_block_boxes(gray, hsv, h, w)
 
     wbc_excl = np.zeros((h, w), np.uint8)
     for box in wbc_boxes:
