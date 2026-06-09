@@ -198,8 +198,12 @@ def purple_mask_strict(img: np.ndarray):
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     H, S, V = cv2.split(hsv)
     L, A, B = cv2.split(lab)
-    purple = (((S > 80) & (V < 210) & (A > 145) & (B < 125)) |
-              ((S > 70) & (V < 185) & (A > 140) & (B < 130) & (H > 110) & (H < 175))).astype(np.uint8) * 255
+    # B (LAB blue-yellow) cleanly separates true WBC/dense-purple (B ~ 87-105)
+    # from pale-violet RBCs (B >= ~117). A loose B gate used to swallow bluish
+    # RBCs and drop them from RBC detection, so keep B tight here. This mask is
+    # only used for RBC exclusion / watershed / viz, never for WBC detection.
+    purple = (((S > 80) & (V < 210) & (A > 145) & (B < 115)) |
+              ((S > 70) & (V < 185) & (A > 140) & (B < 115) & (H > 110) & (H < 175))).astype(np.uint8) * 255
     purple = cv2.medianBlur(purple, 3)
     purple = cv2.morphologyEx(purple, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     return purple, H, S, V, L, A, B
@@ -275,7 +279,14 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
         y1, y2 = int(ys.min()), int(ys.max() + 1)
         bw, bh = x2 - x1, y2 - y1
         large_geom = (bw > 1.05 * r0 and bh > 0.75 * r0) or (bw > 0.75 * r0 and bh > 1.05 * r0)
-        if large_geom:
+        # A real WBC nucleus is intensely stained: its violet core has high
+        # saturation (true cores: median S 178, 99% >= 95) or is deeply violet
+        # (B <= ~102). A pale-violet RBC cluster has a weak core (S ~ 83, B ~ 117)
+        # and is rejected here, so it is not mistaken for a white blood cell.
+        s_core = float(np.median(S[region]))
+        b_core = float(np.median(B[region]))
+        is_nucleus = s_core >= 100 or b_core <= 102
+        if large_geom and is_nucleus:
             # GT box is ~1.03x the nucleus-core bbox, so only a small pad is needed.
             pad = int(0.06 * max(bw, bh))
             score = original_area / (r0 * r0)
