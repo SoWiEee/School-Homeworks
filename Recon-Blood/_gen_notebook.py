@@ -9,6 +9,7 @@ NB_PATH = HERE / "TXL_PBC_Streamlit_Colab.ipynb"
 
 detector_src = (HERE / "blood_cell_detector.py").read_text(encoding="utf-8")
 app_src = (HERE / "app.py").read_text(encoding="utf-8")
+eval_src = (HERE / "eval_iou.py").read_text(encoding="utf-8")
 
 def md(text):
     return {"cell_type": "markdown", "metadata": {}, "source": text}
@@ -31,10 +32,11 @@ cells.append(md(
     "\n"
     "這份 Notebook 完全自給自足，由上而下依序執行每個 cell 就會：\n"
     "\n"
-    "1. 透過 `%%writefile` 把專案原始碼（`blood_cell_detector.py`、`app.py`）寫到磁碟。\n"
+    "1. 透過 `%%writefile` 把專案原始碼（`blood_cell_detector.py`、`app.py`、`eval_iou.py`）寫到磁碟。\n"
     "2. 安裝所需的相依套件。\n"
     "3. 從 GitHub 下載（clone）TXL-PBC 資料集。\n"
-    "4. 透過暫時性的 Cloudflare tunnel 啟動 Streamlit 互動式 App。\n"
+    "4. 對整個資料集跑 **IoU 評估**，印出各類別與 micro 的 P / R / F1 與計數誤差。\n"
+    "5. 透過暫時性的 Cloudflare tunnel 啟動 Streamlit 互動式 App。\n"
     "\n"
     "不需要上傳專案、也不需要任何模型檔。偵測完全是**規則式（rule-based）**的，"
     "只用傳統影像處理，沒有深度學習、也沒有訓練好的模型。\n"
@@ -88,7 +90,18 @@ cells.append(md(
 cells.append(code("%%writefile app.py\n" + app_src))
 
 cells.append(md(
-    "## 3. 安裝相依套件\n"
+    "## 3. 寫出評估腳本 `eval_iou.py`\n"
+    "\n"
+    "`%%writefile` 會把這個 cell 傾印成 `eval_iou.py`，供第 6 節的「全資料集評估」使用，"
+    "也可在終端機直接執行 `python eval_iou.py --split test --iou 0.3`。\n"
+    "\n"
+    "評估方式完全依助教規格：YOLO 標註轉像素框（含邊界裁切）→ 與預測框同類別、"
+    "**一對一貪婪比對**（IoU 由高到低配對）→ 統計各類別與 micro 的 Precision / Recall / F1。"
+))
+cells.append(code("%%writefile eval_iou.py\n" + eval_src))
+
+cells.append(md(
+    "## 4. 安裝相依套件\n"
     "\n"
     "只需要傳統影像處理會用到的套件，不含 scikit-learn（偵測為規則式，沒有模型）。"
 ))
@@ -110,7 +123,7 @@ cells.append(code(
 ))
 
 cells.append(md(
-    "## 4. 取得 TXL-PBC 資料集（git clone）\n"
+    "## 5. 取得 TXL-PBC 資料集（git clone）\n"
     "\n"
     "App 可以用內建的範例樣本執行，但評分 Demo 建議使用完整資料集，這樣才能切換 "
     "train / val / test。這裡直接從 GitHub 做淺層 clone（`--depth 1`），repo 已把影像與標註"
@@ -145,37 +158,82 @@ cells.append(code(
 ))
 
 cells.append(md(
-    "## 5. 快速健全性檢查\n"
+    "## 6. 全資料集評估（All Eval）\n"
     "\n"
-    "拿 test 集第一張影像跑一次完整偵測流程，把預測計數和標註計數印出來對照，"
-    "確認模組能正確 import、資料集路徑正確、偵測流程可運作。"
+    "對**整個資料集**（train + val + test，共 1260 張）逐張跑完整偵測，依助教的 IoU 規格"
+    "統計各類別與 micro 的 Precision / Recall / F1（同時列出 **IoU 0.3** 與較嚴格的 **IoU 0.5**），"
+    "並附三種細胞的**計數誤差**（±30% 為基本要求）。這樣助教可以直接在這裡看到完整指標。\n"
+    "\n"
+    "> ⚠️ 全資料集評估需逐張偵測（含 Hough 圓偵測），在 Colab CPU 上約需數分鐘；"
+    "下方會每 100 張印一次進度。若只想快速看單一 split，可把 `splits` 改成 `['test']`。"
 ))
 cells.append(code(
-    "import os\n"
-    "from blood_cell_detector import list_images, load_image, load_yolo_gt, detect_cells, count_boxes\n"
+    "import os, glob\n"
+    "from blood_cell_detector import detect_cells, load_image, CLASS_NAMES\n"
+    "from eval_iou import load_yolo_gt_clipped, match_one_to_one\n"
     "\n"
-    "# 找出可用的資料集根目錄，找不到就退回內建樣本。\n"
+    "# 找出可用的資料集根目錄。\n"
     "root = None\n"
-    "for candidate in ['TXL-PBC_Dataset/TXL-PBC', '/content/TXL-PBC_Dataset/TXL-PBC', './samples']:\n"
+    "for candidate in ['TXL-PBC_Dataset/TXL-PBC', '/content/TXL-PBC_Dataset/TXL-PBC', './TXL-PBC_Dataset/TXL-PBC']:\n"
     "    if os.path.exists(os.path.join(candidate, 'images')) and os.path.exists(os.path.join(candidate, 'labels')):\n"
     "        root = candidate\n"
     "        break\n"
+    "print('資料集根目錄:', root)\n"
     "\n"
-    "paths = list_images(root, 'test') if root else []\n"
-    "print('根目錄:', root)\n"
-    "print('test 影像數量:', len(paths))\n"
-    "if paths:\n"
-    "    img = load_image(paths[0])\n"
-    "    # mode='Rule-based only' 走純規則式：先抓 WBC，再排除後分 RBC / 血小板。\n"
-    "    preds = detect_cells(img, mode='Rule-based only')\n"
-    "    gts = load_yolo_gt(paths[0], root)\n"
-    "    print('範例影像:', os.path.basename(paths[0]))\n"
-    "    print('標註計數 (GT):', count_boxes(gts))\n"
-    "    print('預測計數 (Pred):', count_boxes(preds))"
+    "splits = ['train', 'val', 'test']   # 要評估的 split；改成 ['test'] 可只跑單一 split\n"
+    "thrs = [0.3, 0.5]\n"
+    "tot = {t: {c: [0, 0, 0] for c in (0, 1, 2)} for t in thrs}   # t -> class -> [tp, fp, fn]\n"
+    "gt_count = {c: 0 for c in (0, 1, 2)}\n"
+    "pred_count = {c: 0 for c in (0, 1, 2)}\n"
+    "\n"
+    "paths = [p for s in splits for p in sorted(glob.glob(os.path.join(root, 'images', s, '*.png')))]\n"
+    "print(f'評估影像數: {len(paths)}（{\"+\".join(splits)}）。逐張偵測中，約需數分鐘…')\n"
+    "for i, p in enumerate(paths, 1):\n"
+    "    img = load_image(p)\n"
+    "    h, w = img.shape[:2]\n"
+    "    gts = load_yolo_gt_clipped(p, root, w, h)\n"
+    "    preds = detect_cells(img)   # 預設 'Improved classical'：含 Hough 補強與自適應紫色排除\n"
+    "    for c in (0, 1, 2):\n"
+    "        ps = [b for b in preds if int(b[0]) == c]\n"
+    "        gs = [g for g in gts if int(g[0]) == c]\n"
+    "        pred_count[c] += len(ps)\n"
+    "        gt_count[c] += len(gs)\n"
+    "        for t in thrs:   # 同一次偵測，於兩個 IoU 門檻各自比對\n"
+    "            tp, fp, fn = match_one_to_one(ps, gs, t)\n"
+    "            tot[t][c][0] += tp; tot[t][c][1] += fp; tot[t][c][2] += fn\n"
+    "    if i % 100 == 0 or i == len(paths):\n"
+    "        print(f'  進度 {i}/{len(paths)}')\n"
+    "\n"
+    "def show(t):\n"
+    "    print(f'\\n=== IoU {t} ===')\n"
+    "    print(f\"{'class':10s}{'TP':>7}{'FP':>7}{'FN':>7}{'P':>8}{'R':>8}{'F1':>8}\")\n"
+    "    micro = [0, 0, 0]\n"
+    "    for c in (0, 1, 2):\n"
+    "        tp, fp, fn = tot[t][c]\n"
+    "        micro[0] += tp; micro[1] += fp; micro[2] += fn\n"
+    "        P = tp / (tp + fp) if tp + fp else 0.0\n"
+    "        R = tp / (tp + fn) if tp + fn else 0.0\n"
+    "        F = 2 * P * R / (P + R) if P + R else 0.0\n"
+    "        print(f'{CLASS_NAMES[c]:10s}{tp:7d}{fp:7d}{fn:7d}{P:8.3f}{R:8.3f}{F:8.3f}')\n"
+    "    tp, fp, fn = micro\n"
+    "    P = tp / (tp + fp) if tp + fp else 0.0\n"
+    "    R = tp / (tp + fn) if tp + fn else 0.0\n"
+    "    F = 2 * P * R / (P + R) if P + R else 0.0\n"
+    "    print(f'{\"micro\":10s}{tp:7d}{fp:7d}{fn:7d}{P:8.3f}{R:8.3f}{F:8.3f}')\n"
+    "\n"
+    "for t in thrs:\n"
+    "    show(t)\n"
+    "\n"
+    "print('\\n=== 計數誤差（±30% 為基本要求）===')\n"
+    "for c in (0, 1, 2):\n"
+    "    g, pr = gt_count[c], pred_count[c]\n"
+    "    err = (pr - g) / g * 100 if g else 0.0\n"
+    "    ok = '✅' if abs(err) <= 30 else '❌'\n"
+    "    print(f'{CLASS_NAMES[c]:10s} GT {g:6d}  Pred {pr:6d}  誤差 {err:+6.1f}%  {ok}')"
 ))
 
 cells.append(md(
-    "## 6. 以 cloudflared 啟動 Streamlit\n"
+    "## 7. 以 cloudflared 啟動 Streamlit\n"
     "\n"
     "執行這個 cell 後，開啟印出來的公開網址即可使用 App。使用期間請保持這份 Notebook 持續執行。"
 ))
