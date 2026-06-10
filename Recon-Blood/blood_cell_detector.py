@@ -297,8 +297,10 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
         oversized = max(bw, bh) >= 4.5 * r0
         strong_stain = (s_core - s_med) >= 70.0
         if large_geom and is_nucleus and (not oversized or strong_stain):
-            # GT box is ~1.03x the nucleus-core bbox, so only a small pad is needed.
-            pad = int(0.06 * max(bw, bh))
+            # The opened violet core sits inside the GT cell box (matched pred/GT
+            # width median 0.928), so pad ~0.10*side to grow the box onto the GT
+            # and lift IoU at the stricter 0.5 threshold.
+            pad = int(0.10 * max(bw, bh))
             score = original_area / (r0 * r0)
             boxes.append([0, max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad), score])
     return merge_by_center(boxes, 0.90 * r0), violet
@@ -360,8 +362,13 @@ def detect_rbc_rule(
             continue
         # GT RBC boxes are ~2*r0 per side and very consistent, so bias the box
         # half-size toward r0 (the resolution-derived radius) for better IoU.
-        radius = float(np.clip(0.5 * max(bw, bh), r0 * 0.88, r0 * 1.18))
-        score = circularity - 0.08 * abs(radius - r0) / r0
+        # The dark cell *ring* sits ~11% inside the GT box, so the contour-derived
+        # radius is systematically small (matched pred/GT width median 0.888).
+        # Scaling by 1.13 re-centres that ratio on 1.0, which lifts IoU markedly
+        # at the stricter 0.5 threshold (matched mean IoU 0.70 -> 0.76) without
+        # losing any 0.3 matches.
+        radius = float(np.clip(0.5 * max(bw, bh), r0 * 0.88, r0 * 1.18)) * 1.13
+        score = circularity - 0.08 * abs(radius / 1.13 - r0) / r0
         # A contour wider/taller than ~1.5 cell radii is a clump's outer boundary,
         # not a single cell; flag it so the wrapper can be suppressed below.
         is_clump = 1.0 if (bw > 1.5 * r0 or bh > 1.5 * r0) else 0.0
@@ -531,9 +538,10 @@ def detect_platelets_rule(
     wbc_boxes = wbc_boxes or []
     # Pad the WBC exclusion boxes outward a little: a WBC nucleus stains its
     # immediate rim, producing granular purple specks just *outside* the box that
-    # otherwise pass as false platelets. The pad is small (0.22*r0) so genuine
-    # platelets sitting clearly away from a WBC are still kept.
-    wbc_excl = [[b[0], b[1] - 0.22 * r0, b[2] - 0.22 * r0, b[3] + 0.22 * r0, b[4] + 0.22 * r0]
+    # otherwise pass as false platelets. The WBC box already includes a 0.10*side
+    # pad, so a small extra 0.10*r0 here suffices -- larger over-excludes genuine
+    # platelets that merely sit near a white cell.
+    wbc_excl = [[b[0], b[1] - 0.10 * r0, b[2] - 0.10 * r0, b[3] + 0.10 * r0, b[4] + 0.10 * r0]
                 for b in wbc_boxes]
     feats, boxes = extract_platelet_components(img)
     if len(boxes) == 0:
