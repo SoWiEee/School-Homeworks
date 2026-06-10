@@ -586,13 +586,20 @@ def detect_platelets_rule(
     for f, b in zip(feats, boxes):
         area_r, circ = float(f[0]), float(f[5])
         s_mean, s_std, b_mean, gray_std = float(f[19]), float(f[20]), float(f[43]), float(f[50])
-        if not (0.06 <= area_r <= 0.80):
+        if gray_std < 5:                          # perfectly flat specks are never platelets
             continue
-        if s_mean < 75 or b_mean > 118:          # purple colour gate
-            continue
-        if s_std < 16 or gray_std < 5:            # granular-texture gate
-            continue
-        if circ < min_circularity:
+        # Strongly-stained granular body (the original gate): bright purple with
+        # high saturation/grayscale variance.
+        strong = (0.06 <= area_r <= 0.80 and s_mean >= 75 and b_mean <= 118
+                  and s_std >= 16 and circ >= min_circularity)
+        # Faint-but-round body: a quarter of real platelets are weakly stained
+        # (s_mean ~68, s_std ~13) and fall just under the strong gate. They still
+        # hold a near-circular, distinctly purple shape (circ >= 0.68, b <= 112),
+        # which separates them from the irregular faint debris that simply lowering
+        # the saturation floor would admit (+8 TP for +2 FP vs +18 FP when lowered).
+        faint_round = (0.08 <= area_r <= 0.55 and s_mean >= 60 and b_mean <= 112
+                       and s_std >= 10 and circ >= 0.68)
+        if not (strong or faint_round):
             continue
         cx = (b[1] + b[3]) / 2
         cy = (b[2] + b[4]) / 2
