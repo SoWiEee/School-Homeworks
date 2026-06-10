@@ -147,17 +147,17 @@ stages = preprocess_pipeline(
     adaptive_c=adaptive_c,
     close_kernel=close_kernel,
 )
-# Show only the rubric stages. "Opening Cleanup" (feeds RBC contour detection)
-# and "Purple Mask" (feeds RBC purple-exclusion) are internal intermediates, and
-# the raw watershed mask is a helper -- hide all three. The remaining six are
-# renumbered 1..6 for a clean display.
+# 只顯示評分規格規定的階段。「Opening Cleanup」（紅血球輪廓偵測前置步驟）
+# 和「Purple Mask」（紅血球紫色排除前置步驟）是內部中間結果，
+# 原始分水嶺遮罩是輔助工具——全部隱藏。其餘六個階段
+# 重新編號為 1..6 以便整齊顯示。
 hidden = {"6 Opening Cleanup", "7 Purple Mask for WBC\\Platelet"}
 visible_stage_names = [k for k in stages.keys() if not k.endswith("_raw") and k not in hidden]
 for row_start in range(0, len(visible_stage_names), 4):
     cols = st.columns(4)
     for col, (idx, name) in zip(cols, enumerate(visible_stage_names[row_start:row_start + 4], row_start + 1)):
         with col:
-            label = f"{idx} {name.split(' ', 1)[1]}"  # renumber 1..6, keep the stage title
+            label = f"{idx} {name.split(' ', 1)[1]}"  # 重新編號為 1..6，保留階段標題
             st.markdown(f"**{label}**")
             st.image(bgr_to_rgb(stages[name]), use_container_width=True)
 

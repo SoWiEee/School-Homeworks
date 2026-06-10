@@ -1,11 +1,10 @@
-"""IoU-based evaluation following the TA's specification.
+"""依助教規格進行 IoU 評估。
 
-GT (YOLO normalized) -> pixel box with boundary clipping. A prediction is a TP
-when it is the same class as a GT and their IoU exceeds a threshold, using
-one-to-one greedy matching (highest-IoU pairs first). Reports per-class and
-micro Precision / Recall / F1.
+GT（YOLO 正規化格式）-> 含邊界裁切的像素框。當預測框與 GT 框
+屬於同一類別且 IoU 超過閥值時，使用一對一貪婪比對（IoU 最高的配對優先），
+視為真陽性（TP）。回報各類別與 micro 的 Precision / Recall / F1。
 
-Usage:
+使用方式：
     python eval_iou.py --split test --iou 0.5 --mode improved
 """
 from __future__ import annotations
@@ -28,7 +27,7 @@ Box = List[float]  # [class, x1, y1, x2, y2]
 
 
 def load_yolo_gt_clipped(img_path: str, dataset_root: str, w: int, h: int) -> List[Box]:
-    """YOLO normalized labels -> pixel boxes, clipped to image bounds."""
+    """YOLO 正規化標註 -> 像素框，裁切至影像邊界內。"""
     split = os.path.basename(os.path.dirname(img_path))
     label_path = os.path.join(
         dataset_root, "labels", split,
@@ -46,7 +45,7 @@ def load_yolo_gt_clipped(img_path: str, dataset_root: str, w: int, h: int) -> Li
             ymin = round((yc - bh / 2) * h)
             xmax = round((xc + bw / 2) * w)
             ymax = round((yc + bh / 2) * h)
-            # boundary clipping
+            # 邊界裁切
             xmin = max(0, min(xmin, w))
             ymin = max(0, min(ymin, h))
             xmax = max(0, min(xmax, w))
@@ -70,7 +69,7 @@ def iou(box_a: Box, box_b: Box) -> float:
 
 
 def match_one_to_one(preds: List[Box], gts: List[Box], thr: float) -> Tuple[int, int, int]:
-    """Greedy one-to-one matching by descending IoU, same class only."""
+    """依 IoU 由高到低的貪婪一對一比對，僅比對同類別。"""
     pairs = []
     for pi, p in enumerate(preds):
         for gi, g in enumerate(gts):
@@ -95,7 +94,7 @@ def match_one_to_one(preds: List[Box], gts: List[Box], thr: float) -> Tuple[int,
 
 def evaluate(dataset_root: str, split: str, mode: str, model, thr: float):
     paths = sorted(glob.glob(os.path.join(dataset_root, "images", split, "*.png")))
-    totals = {c: [0, 0, 0] for c in (0, 1, 2)}  # tp, fp, fn
+    totals = {c: [0, 0, 0] for c in (0, 1, 2)}  # tp（真陽性）, fp（假陽性）, fn（假陰性）
     for path in paths:
         img = load_image(path)
         h, w = img.shape[:2]

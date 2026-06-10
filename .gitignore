@@ -9,3 +9,5 @@ TXL-PBC_Dataset.zip
 *pyc
 assets/
 samples/
+node_modules/
+unpacked/

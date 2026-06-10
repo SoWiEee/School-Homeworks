@@ -1,13 +1,11 @@
 """
-TXL-PBC classical image-processing detector utilities.
+TXL-PBC 傳統影像處理偵測器工具模組。
 
-This module intentionally avoids deep learning. It contains:
-- Basic preprocessing pipeline: grayscale, Gaussian blur, adaptive thresholding,
-  morphological closing/opening.
-- Rule-based WBC/RBC/platelet detectors using color, area, circularity and size.
-- Optional watershed + distance transform helper for RBC clump visualization.
-- Optional ExtraTrees platelet classifier trained on handcrafted features. This is
-  classical machine learning, not a neural network.
+本模組刻意不使用深度學習，包含以下功能：
+- 基礎前處理流程：灰階化、高斯模糊、自適應二值化、形態學閉運算/開運算。
+- 以顏色、面積、圓度和尺寸規則為基礎的 WBC/RBC/血小板偵測器。
+- 選用的分水嶺 + 距離轉換輔助功能，用於紅血球黏連視覺化。
+- 選用的 ExtraTrees 血小板分類器（以手工特徵訓練），屬於傳統機器學習，非神經網路。
 """
 from __future__ import annotations
 
@@ -37,7 +35,7 @@ CLASS_NAMES = {0: "WBC", 1: "RBC", 2: "Platelet"}
 CLASS_IDS = {v: k for k, v in CLASS_NAMES.items()}
 
 COLOR_GT = {
-    0: (255, 180, 0),    # cyan-ish in BGR
+    0: (255, 180, 0),    # BGR 色彩空間中接近青色
     1: (0, 220, 0),
     2: (0, 0, 255),
 }
@@ -59,7 +57,7 @@ def gray_to_bgr(img: np.ndarray) -> np.ndarray:
 
 
 def shape_rbc_radius(h: int, w: int) -> float:
-    """Approximate RBC radius from image resolution, without using labels."""
+    """依影像解析度估算紅血球半徑，不使用標註資訊。"""
     if (h, w) == (575, 575):
         return 65.0
     if (h, w) == (363, 360):
@@ -91,7 +89,7 @@ def load_image(path: str) -> np.ndarray:
 
 
 def load_yolo_gt(img_path: str, dataset_root: str) -> List[Box]:
-    """Load YOLO-format labels for TXL-PBC and convert them into pixel boxes."""
+    """載入 TXL-PBC 的 YOLO 格式標註並轉換為像素框。"""
     img = load_image(img_path)
     h, w = img.shape[:2]
     split = os.path.basename(os.path.dirname(img_path))
@@ -138,7 +136,7 @@ def count_error_table(gts: Sequence[Box], preds: Sequence[Box]) -> List[Dict[str
 
 
 def merge_by_center(boxes: List[List[float]], min_dist: float) -> List[Box]:
-    """Simple center-distance NMS. If score exists at index 5, higher score wins."""
+    """簡易中心距 NMS。若索引 5 有分數，分數較高者優先保留。"""
     if not boxes:
         return []
     if len(boxes[0]) > 5:
@@ -161,7 +159,7 @@ def preprocess_pipeline(
     adaptive_c: int = 5,
     close_kernel: int = 5,
 ) -> Dict[str, np.ndarray]:
-    """Return visualizable stages required by the grading rubric."""
+    """回傳評分規格所需的各階段視覺化結果。"""
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -198,17 +196,16 @@ def purple_mask_strict(img: np.ndarray):
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     H, S, V = cv2.split(hsv)
     L, A, B = cv2.split(lab)
-    # B (LAB blue-yellow) cleanly separates true WBC/dense-purple (B ~ 87-105)
-    # from pale-violet RBCs (B >= ~117). A loose B gate used to swallow bluish
-    # RBCs and drop them from RBC detection, so keep B tight here. This mask is
-    # only used for RBC exclusion / watershed / viz, never for WBC detection.
+    # B 通道（LAB 藍-黃軸）能清楚區分真正的白血球/深紫色區域（B ≈ 87-105）
+    # 與淺紫色紅血球（B ≥ ~117）。若 B 閥值設得太鬆，會把偏藍的
+    # 紅血球也納入紫色遮罩，使其被排除在紅血球偵測之外，因此這裡維持嚴格。
+    # 此遮罩僅用於排除紅血球/分水嶺/視覺化，從不用於白血球偵測。
     #
-    # The B cutoff adapts to the slide's overall stain: on a globally-violet smear
-    # the RBCs themselves shift toward low B and fall under a fixed B<115, getting
-    # wrongly masked out of RBC detection (measured: RBC recall 0.79 on the most
-    # purple third of slides vs 0.93 on the palest). Lowering the cutoff to
-    # B_med - 18 on those slides stops swallowing the shifted RBCs; on normal
-    # slides (B_med >= 133) the cutoff stays at 115, so behaviour is unchanged.
+    # B 截斷值會根據玻片整體染色自適應調整：在整體偏紫的玻片上，
+    # 紅血球本身的 B 值也會降低，落入固定 B<115 的範圍，導致被錯誤排除於
+    # 紅血球偵測（實測：最紫的三分之一玻片 RBC 召回率 0.79，最淺的為 0.93）。
+    # 對這些玻片改用 B_med - 18 作為截斷值，可避免吞掉偏移的紅血球；
+    # 在正常玻片上（B_med >= 133），截斷值維持在 115，行為不變。
     b_med = float(np.median(B))
     b_cut = min(115.0, b_med - 18.0)
     purple = (((S > 80) & (V < 210) & (A > 145) & (B < b_cut)) |
@@ -231,12 +228,11 @@ def purple_mask_loose(img: np.ndarray):
 
 
 def wbc_violet_mask(img: np.ndarray):
-    """Violet-hue mask tuned for WBC nuclei.
+    """針對白血球細胞核調整的紫羅蘭色遮罩。
 
-    WBC nuclei are stained true violet, while RBCs (even when clustered) stay
-    pink/red. Gating on a *tight* hue window (H 120-158) and only loose
-    saturation/value lets weakly-stained pale nuclei through while keeping RBC
-    clusters out, which a saturation-first mask cannot do.
+    白血球細胞核染成純紫色，而紅血球（即使成群聚集）仍維持粉紅/紅色。
+    鎖定*窄色相窗（H 120-158）*並放寬飽和度/亮度門檻，
+    可讓染色較淺的細胞核通過，同時排除紅血球群——單靠飽和度做不到這一點。
     """
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
@@ -249,7 +245,7 @@ def wbc_violet_mask(img: np.ndarray):
 
 
 def point_in_boxes(cx: float, cy: float, boxes: Sequence[Box]) -> bool:
-    """True if (cx, cy) lies inside any [class, x1, y1, x2, y2] box."""
+    """若 (cx, cy) 位於任一 [class, x1, y1, x2, y2] 框內則回傳 True。"""
     for b in boxes:
         if b[1] <= cx <= b[3] and b[2] <= cy <= b[4]:
             return True
@@ -257,29 +253,28 @@ def point_in_boxes(cx: float, cy: float, boxes: Sequence[Box]) -> bool:
 
 
 def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
-    """Detect WBC first, from the violet nucleus stain.
+    """最先偵測白血球，依據細胞核的紫羅蘭色染色。
 
-    This runs before RBC / platelet detection so the resulting boxes can be used
-    to exclude those regions (a WBC must not be re-counted as RBCs or platelets).
+    在紅血球/血小板偵測之前執行，所得框可用於排除這些區域
+    （白血球不應被重複計算成紅血球或血小板）。
     """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     violet, H, S, V, L, A, B = wbc_violet_mask(img)
-    # Keep only the solid nucleus cores. Opening removes thin/edge violet and small
-    # specks, so the bounding box is the WBC nucleus, not a scattered cluster.
+    # 僅保留實心細胞核核心。開運算會移除邊緣紫色細線與小斑點，
+    # 讓邊界框對應的是白血球細胞核，而非分散的群集。
     core_k = ensure_odd(int(max(3, round(r0 * 0.18))))
     cores = cv2.morphologyEx(violet, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (core_k, core_k)))
-    # Merge the fragmented lobes of one nucleus only (small dilation).
+    # 僅合併同一細胞核的碎裂葉片（小幅膨脹）。
     rad = int(max(3, round(r0 * 0.20)))
     cluster = cv2.dilate(cores, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)))
     ncl, labcl, _, _ = cv2.connectedComponentsWithStats(cluster, 8)
-    s_med = float(np.median(S))  # image-wide saturation, for the oversized-blob gate
+    s_med = float(np.median(S))  # 全圖飽和度中位數，用於超大斑塊門檻
     boxes: List[List[float]] = []
     for ci in range(1, ncl):
         region = (labcl == ci) & (cores > 0)
         original_area = int(region.sum())
-        # A WBC nucleus is a large solid violet blob; this size gate rejects the
-        # small violet bodies that belong to platelets.
+        # 白血球細胞核是大型實心紫色斑塊；此尺寸門檻排除血小板大小的紫色點。
         if original_area < max(120, 1.3 * r0 * r0):
             continue
         ys, xs = np.where(region)
@@ -289,44 +284,39 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
         y1, y2 = int(ys.min()), int(ys.max() + 1)
         bw, bh = x2 - x1, y2 - y1
         large_geom = (bw > 1.05 * r0 and bh > 0.75 * r0) or (bw > 0.75 * r0 and bh > 1.05 * r0)
-        # A real WBC nucleus is intensely stained: its violet core has high
-        # saturation (true cores: median S 178, 99% >= 95) or is deeply violet
-        # (B <= ~102). A pale-violet RBC cluster has a weak core (S ~ 83, B ~ 117)
-        # and is rejected here, so it is not mistaken for a white blood cell.
+        # 真正的白血球細胞核染色深：紫色核心飽和度高（真實核心：S 中位數 178，99% >= 95）
+        # 或藍紫很深（B <= ~102）。淺紫色紅血球群的核心偏弱（S ≈ 83, B ≈ 117），
+        # 在此被排除，不會被誤判為白血球。
         s_core = float(np.median(S[region]))
         b_core = float(np.median(B[region]))
         is_nucleus = s_core >= 100 or b_core <= 102
-        # An oversized violet blob (>= 4.5*r0) is only a real (large/monocyte)
-        # nucleus if its core is far more saturated than the whole image. On a
-        # globally violet-shifted smear the violet mask blooms into an image-
-        # spanning blob whose core sits barely above the image median
-        # (s_core - s_med ~ 24, vs ~104 for a true large WBC); without this gate
-        # that bloom becomes a whole-image WBC box that then excludes every RBC /
-        # platelet inside it (RBC recall -> 0 on those images).
+        # 超大紫色斑塊（>= 4.5*r0）只有在核心飽和度遠超全圖時，才算是真實的（大型/單核球）細胞核。
+        # 在整體偏紫的玻片上，紫色遮罩會膨脹成佈滿畫面的斑塊，其核心的飽和度
+        # 只比全圖中位數高一點點（s_core - s_med ≈ 24，真實大型白血球約為 104）；
+        # 若不加此門檻，那個膨脹斑塊會成為一個涵蓋全圖的白血球框，
+        # 進而把框內所有紅血球/血小板都排除（受影響影像的 RBC 召回率 -> 0）。
         oversized = max(bw, bh) >= 4.5 * r0
         strong_stain = (s_core - s_med) >= 70.0
-        # Precision gates (fix 14). The remaining false positives are small,
-        # weakly-violet blobs on globally-violet smears: vs true cores they are
-        # smaller (max-side median 2.4*r0 vs 3.9) and far less saturated than
-        # their own background (s_core - s_med ~ 44 vs ~120). A size floor and a
-        # *general* relative-saturation gate (the same contrast idea the oversize
-        # branch already uses, now applied to every candidate that is not already
-        # deeply violet) drop them without touching recall: FP 77 -> 28, every
-        # true WBC kept (recall unchanged), F1 0.930 -> 0.949 over the full set.
+        # 精準度門檻（修正 14）。剩餘的假陽性是整體偏紫玻片上的小型、
+        # 弱紫色斑塊：與真實核心相比，它們更小（最長邊中位數 2.4*r0 vs 3.9）
+        # 且與自身背景的飽和度對比更弱（s_core - s_med ≈ 44 vs ~120）。
+        # 加入尺寸下限和*通用*相對飽和度門檻（與超大斑塊分支同理，
+        # 現在套用於所有尚未達深紫色的候選框），可在不影響召回率的情況下排除它們：
+        # FP 77 -> 28，所有真實白血球保留（召回率不變），F1 0.930 -> 0.949（全資料集）。
         if max(bw, bh) < 1.6 * r0:
             continue
         if (s_core - s_med) < 60.0 and b_core > 102:
             continue
         if large_geom and is_nucleus and (not oversized or strong_stain):
-            # The opened violet core sits inside the GT cell box (matched pred/GT
-            # width median 0.928), so pad ~0.10*side to grow the box onto the GT
-            # and lift IoU at the stricter 0.5 threshold.
+            # 開運算後的紫色核心位於 GT 框內（匹配 pred/GT 寬度中位數 0.928），
+            # 因此填充約 0.10*邊長，讓框覆蓋到 GT 框，
+            # 提升較嚴格的 IoU 0.5 閥值下的表現。
             pad = int(0.10 * max(bw, bh))
             score = original_area / (r0 * r0)
             boxes.append([0, max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad), score])
-    # WBCs are sparse (1-2 per field), so a generous centre-merge radius folds the
-    # fragmented lobes of one nucleus into a single box (cutting fragmentation FP)
-    # without merging distinct cells -- measured no true-positive loss up to 1.8*r0.
+    # 白血球數量稀少（每張 1-2 個），較大的中心合併半徑能把
+    # 同一細胞核的碎裂葉片合併成單一框（降低碎裂假陽性），
+    # 而不會把不同的細胞合併——實測在 1.8*r0 內不會損失任何真陽性。
     return merge_by_center(boxes, 1.8 * r0), violet
 
 
@@ -340,15 +330,14 @@ def detect_rbc_rule(
     min_circularity: float = 0.08,
     wbc_boxes: Optional[Sequence[Box]] = None,
 ) -> List[Box]:
-    """RBC detector based on area, circularity and resolution-aware size rules.
+    """基於面積、圓度和解析度感知尺寸規則的紅血球偵測器。
 
-    Contours are extracted with RETR_LIST: the inner "hole" of each ring-shaped
-    cell becomes its own contour, which is what splits a touching clump into one
-    detection per cell. The cost is that the clump's *outer* boundary also passes
-    the gates and yields an oversized box wrapping cells it already detected; a
-    containment-suppression pass removes that redundant wrapper afterwards.
-    Candidates whose centre falls inside an already-detected WBC box are dropped,
-    so a white blood cell is never carved up into spurious RBCs.
+    使用 RETR_LIST 提取輪廓：每個環形細胞的內部「空洞」各自成為一個輪廓，
+    使相鄰細胞群能被拆分成個別偵測結果。
+    代價是群體的*外部*邊界也會通過門檻，產生包裹多個已偵測細胞的超大框；
+    後續的包含抑制步驟會移除這些多餘的外部框。
+    中心落在已偵測白血球框內的候選框一律捨棄，
+    避免白血球被切割成多個假紅血球。
     """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
@@ -360,7 +349,7 @@ def detect_rbc_rule(
     pd = int(max(2, round(r0 * 0.08)))
     purple_d = cv2.dilate(strict_purple, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * pd + 1, 2 * pd + 1)))
     contours, _ = cv2.findContours(th, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    candidates: List[List[float]] = []  # [class, x1, y1, x2, y2, score, is_clump]
+    candidates: List[List[float]] = []  # [類別, x1, y1, x2, y2, 分數, 是否為群體]
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < math.pi * (r0 * 0.16) ** 2 or area > math.pi * (r0 * 2.25) ** 2:
@@ -382,27 +371,25 @@ def detect_rbc_rule(
             cy = m["m01"] / m["m00"]
         if purple_d[int(min(h - 1, max(0, cy))), int(min(w - 1, max(0, cx)))] > 0:
             continue
-        if point_in_boxes(cx, cy, wbc_boxes):  # inside a WBC -> not an RBC
+        if point_in_boxes(cx, cy, wbc_boxes):  # 位於白血球框內 -> 不是紅血球
             continue
-        # GT RBC boxes are ~2*r0 per side and very consistent, so bias the box
-        # half-size toward r0 (the resolution-derived radius) for better IoU.
-        # The dark cell *ring* sits ~11% inside the GT box, so the contour-derived
-        # radius is systematically small (matched pred/GT width median 0.888).
-        # Scaling by 1.13 re-centres that ratio on 1.0, which lifts IoU markedly
-        # at the stricter 0.5 threshold (matched mean IoU 0.70 -> 0.76) without
-        # losing any 0.3 matches.
+        # GT 紅血球框約 2*r0 見方且非常一致，因此將框的半徑偏向 r0（解析度推得的半徑）
+        # 以改善 IoU。暗色細胞*環*位於 GT 框內約 11% 處，使輪廓推得的半徑
+        # 系統性偏小（匹配 pred/GT 寬度中位數 0.888）。
+        # 乘以 1.13 可讓該比值回到 1.0，在較嚴格的 IoU 0.5 閥值下
+        # 顯著提升 IoU（匹配平均 IoU 0.70 -> 0.76），且不損失任何 0.3 匹配。
         radius = float(np.clip(0.5 * max(bw, bh), r0 * 0.88, r0 * 1.18)) * 1.13
         score = circularity - 0.08 * abs(radius / 1.13 - r0) / r0
-        # A contour wider/taller than ~1.5 cell radii is a clump's outer boundary,
-        # not a single cell; flag it so the wrapper can be suppressed below.
+        # 輪廓寬度或高度超過約 1.5 個細胞半徑，即為群體外部邊界框，
+        # 而非單一細胞；標記以便後續步驟抑制。
         is_clump = 1.0 if (bw > 1.5 * r0 or bh > 1.5 * r0) else 0.0
         candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), score, is_clump])
-    # Containment suppression: drop a clump wrapper box only when a finer
-    # (non-clump) detection centre lies *well inside* it (within the central 80%),
-    # so the wrapper is genuinely redundant. Checking against the full wrapper box
-    # over-suppressed: a separate cell merely touching the clump's edge wrongly
-    # dropped the wrapper, losing visibly-present cells (worse once boxes grew in
-    # fix 9). The 0.80 shrink keeps fix 6's de-duplication while recovering them.
+    # 包含抑制：僅當較精細的（非群體）偵測中心落在框的中央 80%「深處」時，
+    # 才捨棄群體外部框——此時外部框確實是多餘的。
+    # 若對整個框判斷包含關係，會過度抑制：
+    # 一個只是碰到群體邊緣的獨立細胞，會錯誤地讓外部框被捨棄，
+    # 造成漏偵測（在修正 9 框變大後更嚴重）。
+    # 0.80 縮小保留了修正 6 的去重效果，同時恢復了被誤刪的細胞。
     contain_shrink = 0.80
     fine_centers = [((b[1] + b[3]) / 2, (b[2] + b[4]) / 2) for b in candidates if not b[6]]
     kept: List[List[float]] = []
@@ -417,27 +404,25 @@ def detect_rbc_rule(
 
 
 def _fill_holes(mask: np.ndarray) -> np.ndarray:
-    """Fill the enclosed background regions of a binary mask (donut -> disk)."""
+    """填充二值遮罩中的封閉背景區域（甜甜圈形狀 -> 實心圓）。"""
     ff = mask.copy()
     h, w = mask.shape[:2]
     flood_mask = np.zeros((h + 2, w + 2), np.uint8)
-    cv2.floodFill(ff, flood_mask, (0, 0), 255)  # flood the outer background
-    return mask | cv2.bitwise_not(ff)            # add only the enclosed holes
+    cv2.floodFill(ff, flood_mask, (0, 0), 255)  # 填充外部背景
+    return mask | cv2.bitwise_not(ff)            # 僅新增被封閉的空洞
 
 
 def rbc_filled_foreground(img: np.ndarray, r0: float, strict_purple: np.ndarray) -> np.ndarray:
-    """Solid RBC cell-body mask for distance transform / watershed.
+    """用於距離轉換/分水嶺的實心紅血球細胞遮罩。
 
-    RBCs are dark membrane *rings* around a pale centre on an often-tinted
-    background, so a colour/brightness threshold floods ~94% of the field and the
-    distance transform is meaningless. Instead, take the membrane ring mask, close
-    its small gaps, and fill the enclosed centres -- turning each donut into a
-    solid disk. Touching cells then form a multi-lobed blob with one distance peak
-    per cell, which is what watershed needs to split them.
+    紅血球是淡色背景上的暗色環形膜，直接對顏色/亮度做閥值會淹沒全圖（~94%），
+    使距離轉換失去意義。改用膜環遮罩，填補小缺口後填實封閉的中心，
+    將甜甜圈形狀轉換成實心圓，相鄰細胞形成多葉狀斑塊，
+    每個細胞有一個距離峰值，正是分水嶺分割所需的形式。
     """
-    # Same adaptive-threshold ring mask as preprocess_pipeline stage 6, computed
-    # directly here (preprocess_pipeline calls watershed_visualization, which would
-    # recurse back into this function).
+    # 與 preprocess_pipeline 第 6 階段相同的自適應閥值環遮罩，
+    # 直接在此計算（preprocess_pipeline 呼叫 watershed_visualization，
+    # 後者又會呼叫本函式，形成遞迴）。
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     block = ensure_odd(2 * round(r0 * 1.25) + 1, 15)
@@ -454,16 +439,13 @@ def rbc_filled_foreground(img: np.ndarray, r0: float, strict_purple: np.ndarray)
 
 
 def watershed_rbc_candidates(img: np.ndarray, strict_purple: Optional[np.ndarray] = None) -> List[Box]:
-    """Watershed + distance transform RBC candidates for clump splitting.
+    """用於黏連細胞分割的分水嶺+距離轉換紅血球候選框。
 
-    The foreground here is the *filled* cell bodies, not a colour mask: RBCs are
-    dark rings around a pale centre on an often-tinted background, so a colour
-    threshold floods almost the whole field (~94%) and the distance transform
-    collapses to one peak. Instead we take the membrane ring mask, close its small
-    gaps, and fill the enclosed centres into solid disks; touching cells then form
-    a multi-lobed blob whose distance transform has one peak per cell, which
-    watershed splits. These are returned as *supplementary* candidates and merged
-    with the contour detector, recovering cells lost where rings merge.
+    前景是*填實的*細胞本體，而非顏色遮罩：紅血球是淡色背景上的暗色環，
+    顏色閥值幾乎淹沒全圖（~94%），距離轉換只剩一個峰值。
+    改用膜環遮罩、填補小缺口並填實封閉中心成實心圓，相鄰細胞形成
+    多葉狀斑塊，距離轉換每個細胞有一個峰值，可供分水嶺分割。
+    結果作為*補充*候選框，與輪廓偵測器合併，以恢復環形相連處的漏偵測。
     """
     if watershed is None or peak_local_max is None or regionprops is None:
         return []
@@ -483,25 +465,24 @@ def watershed_rbc_candidates(img: np.ndarray, strict_purple: Optional[np.ndarray
     candidates: List[List[float]] = []
     for reg in regionprops(labels_ws):
         area = reg.area
-        # Gate only on area: a distance peak that survived threshold_abs already
-        # marks a cell-sized solid core. The watershed *region* shape (bbox,
-        # aspect, circularity) is unreliable -- a basin that bleeds into a touching
-        # neighbour is elongated yet its peak is a real cell -- so gating on shape
-        # discards the very clump cells we are trying to recover.
+        # 僅以面積篩選：通過 threshold_abs 的距離峰值已標記細胞大小的實心核心。
+        # 分水嶺*區域*的形狀（bbox、長寬比、圓度）不可靠——
+        # 滲入相鄰細胞的盆地形狀細長，但其峰值仍是真實細胞——
+        # 因此對形狀加門檻，反而會排除我們要恢復的群體細胞。
         if area < math.pi * (r0 * 0.35) ** 2 or area > math.pi * (r0 * 2.20) ** 2:
             continue
         y1, x1, y2, x2 = reg.bbox
         bw, bh = x2 - x1, y2 - y1
         cy, cx = reg.centroid
-        # GT RBC half-side ~ r0 and very consistent; emit an r0-sized box (lightly
-        # adapted to the region) regardless of the jagged region extent.
+        # GT 紅血球半邊長約等於 r0 且非常一致；無論區域的鋸齒狀範圍如何，
+        # 都發射 r0 大小的框（輕微適應區域）。
         radius = float(np.clip(0.50 * max(bw, bh), r0 * 0.90, r0 * 1.15)) * 1.06
         candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), 0.45])
     return merge_by_center(candidates, 0.42 * r0)
 
 
 def watershed_visualization(img: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Create an overlay for watershed split boundaries and the foreground mask."""
+    """建立分水嶺分割邊界與前景遮罩的疊加圖。"""
     if watershed is None or peak_local_max is None:
         return img.copy(), np.zeros(img.shape[:2], np.uint8)
     h, w = img.shape[:2]
@@ -526,7 +507,7 @@ def watershed_visualization(img: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def extract_platelet_components(img: np.ndarray) -> Tuple[np.ndarray, List[Box]]:
-    """Candidate components and handcrafted features for classical ML platelet classifier."""
+    """血小板傳統機器學習分類器的候選成分與手工特徵。"""
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     mask, H, S, V, L, A, B = purple_mask_loose(img)
@@ -581,59 +562,56 @@ def detect_platelets_rule(
     min_circularity: float = 0.30,
     wbc_boxes: Optional[Sequence[Box]] = None,
 ) -> List[Box]:
-    """Rule-only platelet detector.
+    """純規則式血小板偵測器。
 
-    Real platelets are small purple bodies with granular internal texture, so they
-    are separated from uniform purple specks by saturation/grayscale *variation*
-    (S std, gray std) plus colour and size gates derived on the training split.
-    The boxes are given a fixed size (~0.84*r0 per side) to match the very
-    consistent platelet ground-truth boxes. Candidates inside a detected WBC box
-    are dropped (a WBC nucleus must not be split into platelets).
+    真實血小板是具有顆粒狀內部紋理的小型紫色體，
+    因此透過飽和度/灰階的*變異程度*（S 標準差、灰階標準差）
+    加上從訓練集推導的顏色和尺寸門檻，來區分均勻紫色斑點。
+    框大小固定（約 0.84*r0 見方），以符合非常一致的血小板真實標註框。
+    位於已偵測白血球框內的候選框將被捨棄（白血球細胞核不應被拆分成血小板）。
     """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     wbc_boxes = wbc_boxes or []
-    # Pad the WBC exclusion boxes outward a little: a WBC nucleus stains its
-    # immediate rim, producing granular purple specks just *outside* the box that
-    # otherwise pass as false platelets. The WBC box already includes a 0.10*side
-    # pad, so a small extra 0.10*r0 here suffices -- larger over-excludes genuine
-    # platelets that merely sit near a white cell.
+    # 將白血球排除框稍微向外填充：白血球細胞核會染色其緊鄰邊緣，
+    # 在框外產生顆粒狀紫色斑點，這些斑點原本會被誤判為血小板。
+    # 白血球框已包含 0.10*邊長的填充，因此這裡再額外填充 0.10*r0 就足夠——
+    # 再大的話會過度排除真正靠近白血球的血小板。
     wbc_excl = [[b[0], b[1] - 0.10 * r0, b[2] - 0.10 * r0, b[3] + 0.10 * r0, b[4] + 0.10 * r0]
                 for b in wbc_boxes]
     feats, boxes = extract_platelet_components(img)
     if len(boxes) == 0:
         return []
-    # Feature column layout comes from extract_platelet_components():
-    #   0 area_r, 5 circularity, 19 S_mean, 20 S_std, 43 B_mean, 50 gray_std.
+    # 特徵欄位排列來自 extract_platelet_components()：
+    #   0 area_r, 5 circularity, 19 S_mean, 20 S_std, 43 B_mean, 50 gray_std。
     half = 0.42 * r0
     out: List[List[float]] = []
     for f, b in zip(feats, boxes):
         area_r, circ = float(f[0]), float(f[5])
         s_mean, s_std, b_mean, gray_std = float(f[19]), float(f[20]), float(f[43]), float(f[50])
-        if gray_std < 5:                          # perfectly flat specks are never platelets
+        if gray_std < 5:                          # 完全平整的斑點永遠不是血小板
             continue
-        # Strongly-stained granular body (the original gate): bright purple with
-        # high saturation/grayscale variance. Two precision gates (fix 16) tighten
-        # it: a true platelet is *deeply* purple (B_mean p90 = 105) and reasonably
-        # round, whereas the residual false positives are bluer (B_mean median 108)
-        # and ragged (circularity median 0.52 vs 0.80). Capping B_mean at 110 and
-        # lifting the circularity floor to 0.30 (via min_circularity's new default)
-        # removes them: FP 176 -> 96, precision 0.69 -> 0.80, F1 0.715 -> 0.759
-        # over the full dataset, recall held at 0.72 (only ~9 real platelets lost).
+        # 強染色顆粒體（原始門檻）：飽和度與灰階變異高的亮紫色體。
+        # 修正 16 新增兩個精準度門檻：真實血小板*深度*紫（B_mean 第 90 百分位 = 105）
+        # 且形狀較圓，而剩餘的假陽性偏藍（B_mean 中位數 108）且邊緣不規則
+        # （圓度中位數 0.52 vs 真實 0.80）。
+        # 將 B_mean 上限設為 110、圓度下限提高至 0.30（透過 min_circularity 新預設值），
+        # 可排除它們：FP 176 -> 96，精準率 0.69 -> 0.80，F1 0.715 -> 0.759
+        # （全資料集，召回率維持在 0.72，僅損失約 9 個真實血小板）。
         strong = (0.06 <= area_r <= 0.80 and s_mean >= 75 and b_mean <= 110
                   and s_std >= 16 and circ >= min_circularity)
-        # Faint-but-round body: a quarter of real platelets are weakly stained
-        # (s_mean ~68, s_std ~13) and fall just under the strong gate. They still
-        # hold a near-circular, distinctly purple shape (circ >= 0.68, b <= 112),
-        # which separates them from the irregular faint debris that simply lowering
-        # the saturation floor would admit (+8 TP for +2 FP vs +18 FP when lowered).
+        # 淡染但形狀圓的體：約四分之一的真實血小板染色較弱
+        # （s_mean ≈ 68, s_std ≈ 13），剛好低於強染色門檻。
+        # 它們仍然具有近圓形、明顯偏紫的形狀（circ >= 0.68, b <= 112），
+        # 可以與不規則的淡色碎屑區分開來
+        # （+8 TP 換 +2 FP，若直接降低飽和度下限則為 +18 FP）。
         faint_round = (0.08 <= area_r <= 0.55 and s_mean >= 60 and b_mean <= 112
                        and s_std >= 10 and circ >= 0.68)
         if not (strong or faint_round):
             continue
         cx = (b[1] + b[3]) / 2
         cy = (b[2] + b[4]) / 2
-        if point_in_boxes(cx, cy, wbc_excl):     # inside/touching a WBC -> not a platelet
+        if point_in_boxes(cx, cy, wbc_excl):     # 位於/接觸白血球框 -> 不是血小板
             continue
         score = s_std + 10 * area_r
         out.append([2, max(0, cx - half), max(0, cy - half), min(w, cx + half), min(h, cy + half), score])
@@ -664,15 +642,13 @@ def detect_platelets_ml(img: np.ndarray, model, threshold: float = 0.60) -> List
 
 def hough_rbc_candidates(img: np.ndarray, strict_purple: Optional[np.ndarray] = None,
                          wbc_boxes: Optional[Sequence[Box]] = None, param2: int = 24) -> List[Box]:
-    """Hough-circle RBC recovery for touching / incomplete-ring cells.
+    """用 Hough 圓偵測恢復相鄰/不完整環形紅血球的補充候選框。
 
-    RBCs are near-uniform circles (radius ~ r0). The contour detector relies on
-    each cell's pale centre forming a closed "hole"; that fails where membranes
-    merge (touching cells) or where the ring is only a faint arc. The Hough
-    circle accumulator votes from even partial / overlapping arcs, so it recovers
-    those cells where watershed (a blob prior) cannot. Returned as supplementary
-    candidates, filtered against WBC boxes and dense-purple (WBC/platelet)
-    regions; boxes are r0-sized to match the consistent RBC ground truth.
+    紅血球是近圓形（半徑 ~ r0）。輪廓偵測器依賴每個細胞的淡色中心形成封閉的「空洞」；
+    當細胞膜相連（相鄰細胞）或環形只是淡弧線時，這個假設就會失效。
+    Hough 圓累加器可從不完整/重疊弧線投票，因此能恢復分水嶺（依賴斑塊先驗）無法恢復的細胞。
+    作為補充候選框回傳，會針對白血球框和密集紫色（白血球/血小板）區域進行篩選；
+    框大小設為 r0 大小以符合一致的紅血球真實標註。
     """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
@@ -691,7 +667,7 @@ def hough_rbc_candidates(img: np.ndarray, strict_purple: Optional[np.ndarray] = 
     for cx, cy, _r in circles[0]:
         if purple_d[int(min(h - 1, max(0, cy))), int(min(w - 1, max(0, cx)))] > 0:
             continue
-        if point_in_boxes(cx, cy, wbc_boxes):  # inside a WBC -> not an RBC
+        if point_in_boxes(cx, cy, wbc_boxes):  # 位於白血球框內 -> 不是紅血球
             continue
         out.append([1, max(0, cx - r0), max(0, cy - r0), min(w, cx + r0), min(h, cy + r0)])
     return merge_by_center(out, 0.42 * r0)
@@ -711,35 +687,32 @@ def detect_cells(
     rbc_min_circularity: float = 0.08,
     platelet_min_circularity: float = 0.30,
 ) -> List[Box]:
-    """Run all detectors and return unified boxes.
+    """執行所有偵測器並回傳統一格式的框。
 
-    WBC is detected first; its boxes are then used to exclude the same regions
-    from RBC and platelet detection, so a white blood cell cannot be re-counted
-    as red cells or platelets. Hough circles supplement the RBC contour pass to
-    recover touching / faint-ring cells (additive, deduped by centre distance).
+    白血球最先偵測；其框隨後用於排除紅血球和血小板偵測中的相同區域，
+    使白血球不會被重複計算為紅血球或血小板。Hough 圓補充紅血球輪廓偵測，
+    恢復相鄰/環形不完整的細胞（補充性，以中心距去重）。
     """
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     wbc, _violet = detect_wbc(img)
     rbc = detect_rbc_rule(img, None, gaussian_kernel, adaptive_block_ratio, adaptive_c, close_kernel, rbc_min_circularity, wbc_boxes=wbc)
     if use_hough:
-        # Supplement with Hough circles for clump / incomplete-ring RBCs the
-        # contour pass misses; merge keeps existing boxes (higher score) and only
-        # adds circles with no nearby detection.
+        # 用 Hough 圓補充黏連/環形不完整的紅血球（輪廓偵測器會漏掉它們）；
+        # 合併時保留現有框（分數較高），僅新增附近沒有偵測結果的圓。
         hough = hough_rbc_candidates(img, wbc_boxes=wbc)
         rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in hough], 0.42 * r0)
     if use_watershed:
-        # Add only missing watershed candidates by center-distance merge.
+        # 透過中心距合併，僅新增分水嶺中缺少的候選框。
         ws = [b for b in watershed_rbc_candidates(img) if not point_in_boxes((b[1] + b[3]) / 2, (b[2] + b[4]) / 2, wbc)]
         rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in ws], 0.42 * r0)
-    # Size-aware over-detection cleanup (fix 15). The contour+Hough union over-
-    # detects in dense clumps: redundant boxes land in the gaps between cells,
-    # ~1.5 r0 off the nearest real cell centre and clipping its edge (IoU ~0.1),
-    # which the 0.42 r0 centre-merge is too tight to catch. A second centre-merge
-    # at 1.0 r0 that *prioritises boxes whose side is closest to the canonical
-    # 2 r0* keeps the genuine cell box and drops the offset gap-boxes. Real
-    # touching cells (centres ~2 r0 apart) survive. FP 4822->4001, precision
-    # 0.747->0.776, RBC count error +16.9%->+9.5%, F1 0.805->0.811 (full dataset).
+    # 尺寸感知過度偵測清理（修正 15）。輪廓+Hough 聯集在密集群體中
+    # 會過度偵測：多餘的框落在細胞間隙，距最近真實細胞中心約 1.5 r0，
+    # 僅切到邊緣（IoU ≈ 0.1），而 0.42 r0 的中心合併不夠緊以捕捉它們。
+    # 以 1.0 r0 的中心合併再做一次，*優先保留邊長最接近標準 2 r0 的框*，
+    # 保留真實細胞框並捨棄偏移的間隙框。
+    # 真正相鄰的細胞（中心距約 2 r0）可以存活。
+    # FP 4822->4001，精準率 0.747->0.776，RBC 計數誤差 +16.9%->+9.5%，F1 0.805->0.811（全資料集）。
     rbc = merge_by_center([b[:5] + [-abs(max(b[3] - b[1], b[4] - b[2]) - 2 * r0)] for b in rbc], 1.0 * r0)
     if mode.lower().startswith("rule"):
         platelets = detect_platelets_rule(img, platelet_min_circularity, wbc_boxes=wbc)
@@ -749,7 +722,7 @@ def detect_cells(
 
 
 def draw_boxes(img: np.ndarray, boxes: Sequence[Box], prefix: str = "Pred", thickness: int = 2) -> np.ndarray:
-    """Draw GT:WBC / Pred:RBC labels on image."""
+    """在影像上繪製 GT:WBC / Pred:RBC 等標籤。"""
     out = img.copy()
     colors = COLOR_GT if prefix.upper() == "GT" else COLOR_PRED
     for box in boxes:
