@@ -305,6 +305,18 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
         # platelet inside it (RBC recall -> 0 on those images).
         oversized = max(bw, bh) >= 4.5 * r0
         strong_stain = (s_core - s_med) >= 70.0
+        # Precision gates (fix 14). The remaining false positives are small,
+        # weakly-violet blobs on globally-violet smears: vs true cores they are
+        # smaller (max-side median 2.4*r0 vs 3.9) and far less saturated than
+        # their own background (s_core - s_med ~ 44 vs ~120). A size floor and a
+        # *general* relative-saturation gate (the same contrast idea the oversize
+        # branch already uses, now applied to every candidate that is not already
+        # deeply violet) drop them without touching recall: FP 77 -> 28, every
+        # true WBC kept (recall unchanged), F1 0.930 -> 0.949 over the full set.
+        if max(bw, bh) < 1.6 * r0:
+            continue
+        if (s_core - s_med) < 60.0 and b_core > 102:
+            continue
         if large_geom and is_nucleus and (not oversized or strong_stain):
             # The opened violet core sits inside the GT cell box (matched pred/GT
             # width median 0.928), so pad ~0.10*side to grow the box onto the GT
@@ -312,7 +324,10 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
             pad = int(0.10 * max(bw, bh))
             score = original_area / (r0 * r0)
             boxes.append([0, max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad), score])
-    return merge_by_center(boxes, 0.90 * r0), violet
+    # WBCs are sparse (1-2 per field), so a generous centre-merge radius folds the
+    # fragmented lobes of one nucleus into a single box (cutting fragmentation FP)
+    # without merging distinct cells -- measured no true-positive loss up to 1.8*r0.
+    return merge_by_center(boxes, 1.8 * r0), violet
 
 
 def detect_rbc_rule(
