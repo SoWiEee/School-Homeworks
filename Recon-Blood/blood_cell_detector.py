@@ -578,7 +578,7 @@ def extract_platelet_components(img: np.ndarray) -> Tuple[np.ndarray, List[Box]]
 
 def detect_platelets_rule(
     img: np.ndarray,
-    min_circularity: float = 0.15,
+    min_circularity: float = 0.30,
     wbc_boxes: Optional[Sequence[Box]] = None,
 ) -> List[Box]:
     """Rule-only platelet detector.
@@ -613,8 +613,14 @@ def detect_platelets_rule(
         if gray_std < 5:                          # perfectly flat specks are never platelets
             continue
         # Strongly-stained granular body (the original gate): bright purple with
-        # high saturation/grayscale variance.
-        strong = (0.06 <= area_r <= 0.80 and s_mean >= 75 and b_mean <= 118
+        # high saturation/grayscale variance. Two precision gates (fix 16) tighten
+        # it: a true platelet is *deeply* purple (B_mean p90 = 105) and reasonably
+        # round, whereas the residual false positives are bluer (B_mean median 108)
+        # and ragged (circularity median 0.52 vs 0.80). Capping B_mean at 110 and
+        # lifting the circularity floor to 0.30 (via min_circularity's new default)
+        # removes them: FP 176 -> 96, precision 0.69 -> 0.80, F1 0.715 -> 0.759
+        # over the full dataset, recall held at 0.72 (only ~9 real platelets lost).
+        strong = (0.06 <= area_r <= 0.80 and s_mean >= 75 and b_mean <= 110
                   and s_std >= 16 and circ >= min_circularity)
         # Faint-but-round body: a quarter of real platelets are weakly stained
         # (s_mean ~68, s_std ~13) and fall just under the strong gate. They still
@@ -703,7 +709,7 @@ def detect_cells(
     adaptive_c: int = 5,
     close_kernel: int = 5,
     rbc_min_circularity: float = 0.08,
-    platelet_min_circularity: float = 0.15,
+    platelet_min_circularity: float = 0.30,
 ) -> List[Box]:
     """Run all detectors and return unified boxes.
 

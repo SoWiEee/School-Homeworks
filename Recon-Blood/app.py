@@ -91,7 +91,7 @@ with st.sidebar:
     adaptive_c = st.slider("Adaptive threshold C", -5, 20, 5, 1)
     close_kernel = st.slider("Morphological closing kernel", 3, 21, 5, 2)
     rbc_min_circularity = st.slider("RBC min circularity", 0.02, 0.50, 0.08, 0.01)
-    platelet_min_circularity = st.slider("Platelet min circularity - rule mode", 0.00, 0.80, 0.15, 0.01)
+    platelet_min_circularity = st.slider("Platelet min circularity - rule mode", 0.00, 0.80, 0.30, 0.01)
 
 img = load_image(img_path)
 gts = load_yolo_gt(img_path, str(dataset_root))
