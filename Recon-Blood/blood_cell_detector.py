@@ -202,8 +202,17 @@ def purple_mask_strict(img: np.ndarray):
     # from pale-violet RBCs (B >= ~117). A loose B gate used to swallow bluish
     # RBCs and drop them from RBC detection, so keep B tight here. This mask is
     # only used for RBC exclusion / watershed / viz, never for WBC detection.
-    purple = (((S > 80) & (V < 210) & (A > 145) & (B < 115)) |
-              ((S > 70) & (V < 185) & (A > 140) & (B < 115) & (H > 110) & (H < 175))).astype(np.uint8) * 255
+    #
+    # The B cutoff adapts to the slide's overall stain: on a globally-violet smear
+    # the RBCs themselves shift toward low B and fall under a fixed B<115, getting
+    # wrongly masked out of RBC detection (measured: RBC recall 0.79 on the most
+    # purple third of slides vs 0.93 on the palest). Lowering the cutoff to
+    # B_med - 18 on those slides stops swallowing the shifted RBCs; on normal
+    # slides (B_med >= 133) the cutoff stays at 115, so behaviour is unchanged.
+    b_med = float(np.median(B))
+    b_cut = min(115.0, b_med - 18.0)
+    purple = (((S > 80) & (V < 210) & (A > 145) & (B < b_cut)) |
+              ((S > 70) & (V < 185) & (A > 140) & (B < b_cut) & (H > 110) & (H < 175))).astype(np.uint8) * 255
     purple = cv2.medianBlur(purple, 3)
     purple = cv2.morphologyEx(purple, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     return purple, H, S, V, L, A, B
