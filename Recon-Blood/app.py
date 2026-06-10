@@ -82,6 +82,8 @@ with st.sidebar:
     selected_name = st.selectbox("Image", image_names, index=0)
     img_path = image_paths[image_names.index(selected_name)]
 
+    uploaded_file = st.file_uploader("Upload Image (overrides selection above)", type=["png", "jpg", "jpeg"])
+
     st.header("Detector")
     use_watershed = st.checkbox("Use Watershed RBC supplementation", value=False, help="Adds distance-transform watershed candidates for adjacent/overlapping RBCs. Useful for demo; may increase false positives on some images.")
 
@@ -93,8 +95,14 @@ with st.sidebar:
     rbc_min_circularity = st.slider("RBC min circularity", 0.02, 0.50, 0.08, 0.01)
     platelet_min_circularity = st.slider("Platelet min circularity - rule mode", 0.00, 0.80, 0.30, 0.01)
 
-img = load_image(img_path)
-gts = load_yolo_gt(img_path, str(dataset_root))
+if uploaded_file is not None:
+    file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    selected_name = uploaded_file.name
+    gts = []
+else:
+    img = load_image(img_path)
+    gts = load_yolo_gt(img_path, str(dataset_root))
 preds = detect_cells(
     img,
     mode="Rule-based only",
