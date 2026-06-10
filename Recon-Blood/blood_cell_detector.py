@@ -264,6 +264,7 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
     rad = int(max(3, round(r0 * 0.20)))
     cluster = cv2.dilate(cores, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1)))
     ncl, labcl, _, _ = cv2.connectedComponentsWithStats(cluster, 8)
+    s_med = float(np.median(S))  # image-wide saturation, for the oversized-blob gate
     boxes: List[List[float]] = []
     for ci in range(1, ncl):
         region = (labcl == ci) & (cores > 0)
@@ -286,7 +287,16 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
         s_core = float(np.median(S[region]))
         b_core = float(np.median(B[region]))
         is_nucleus = s_core >= 100 or b_core <= 102
-        if large_geom and is_nucleus:
+        # An oversized violet blob (>= 4.5*r0) is only a real (large/monocyte)
+        # nucleus if its core is far more saturated than the whole image. On a
+        # globally violet-shifted smear the violet mask blooms into an image-
+        # spanning blob whose core sits barely above the image median
+        # (s_core - s_med ~ 24, vs ~104 for a true large WBC); without this gate
+        # that bloom becomes a whole-image WBC box that then excludes every RBC /
+        # platelet inside it (RBC recall -> 0 on those images).
+        oversized = max(bw, bh) >= 4.5 * r0
+        strong_stain = (s_core - s_med) >= 70.0
+        if large_geom and is_nucleus and (not oversized or strong_stain):
             # GT box is ~1.03x the nucleus-core bbox, so only a small pad is needed.
             pad = int(0.06 * max(bw, bh))
             score = original_area / (r0 * r0)
