@@ -392,27 +392,64 @@ def detect_rbc_rule(
     return merge_by_center(kept, 0.43 * r0)
 
 
+def _fill_holes(mask: np.ndarray) -> np.ndarray:
+    """Fill the enclosed background regions of a binary mask (donut -> disk)."""
+    ff = mask.copy()
+    h, w = mask.shape[:2]
+    flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+    cv2.floodFill(ff, flood_mask, (0, 0), 255)  # flood the outer background
+    return mask | cv2.bitwise_not(ff)            # add only the enclosed holes
+
+
+def rbc_filled_foreground(img: np.ndarray, r0: float, strict_purple: np.ndarray) -> np.ndarray:
+    """Solid RBC cell-body mask for distance transform / watershed.
+
+    RBCs are dark membrane *rings* around a pale centre on an often-tinted
+    background, so a colour/brightness threshold floods ~94% of the field and the
+    distance transform is meaningless. Instead, take the membrane ring mask, close
+    its small gaps, and fill the enclosed centres -- turning each donut into a
+    solid disk. Touching cells then form a multi-lobed blob with one distance peak
+    per cell, which is what watershed needs to split them.
+    """
+    # Same adaptive-threshold ring mask as preprocess_pipeline stage 6, computed
+    # directly here (preprocess_pipeline calls watershed_visualization, which would
+    # recurse back into this function).
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    block = ensure_odd(2 * round(r0 * 1.25) + 1, 15)
+    adaptive = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block, 5)
+    closing = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    th = cv2.morphologyEx(closing, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    ck = ensure_odd(int(max(5, round(r0 * 0.30))), 5)
+    ring = cv2.morphologyEx(th, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ck, ck)))
+    fg = _fill_holes(ring)
+    pd = int(max(2, round(r0 * 0.08)))
+    purple_d = cv2.dilate(strict_purple, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * pd + 1, 2 * pd + 1)))
+    fg[purple_d > 0] = 0
+    return cv2.morphologyEx(fg, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+
+
 def watershed_rbc_candidates(img: np.ndarray, strict_purple: Optional[np.ndarray] = None) -> List[Box]:
-    """Watershed + distance transform RBC candidates for clump splitting."""
+    """Watershed + distance transform RBC candidates for clump splitting.
+
+    The foreground here is the *filled* cell bodies, not a colour mask: RBCs are
+    dark rings around a pale centre on an often-tinted background, so a colour
+    threshold floods almost the whole field (~94%) and the distance transform
+    collapses to one peak. Instead we take the membrane ring mask, close its small
+    gaps, and fill the enclosed centres into solid disks; touching cells then form
+    a multi-lobed blob whose distance transform has one peak per cell, which
+    watershed splits. These are returned as *supplementary* candidates and merged
+    with the contour detector, recovering cells lost where rings merge.
+    """
     if watershed is None or peak_local_max is None or regionprops is None:
         return []
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    _, S, V = cv2.split(hsv)
-    L, _, _ = cv2.split(lab)
     if strict_purple is None:
         strict_purple, *_ = purple_mask_strict(img)
-    fg = (((S > 15) & (V < 252)) | (L < 246)).astype(np.uint8) * 255
-    pd = int(max(3, round(r0 * 0.12)))
-    purple_d = cv2.dilate(strict_purple, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * pd + 1, 2 * pd + 1)))
-    fg[purple_d > 0] = 0
-    fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-    ck = ensure_odd(int(max(5, round(r0 * 0.18))), 5)
-    fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ck, ck)))
+    fg = rbc_filled_foreground(img, r0, strict_purple)
     dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
-    coords = peak_local_max(dist, min_distance=max(5, int(r0 * 0.52)), threshold_abs=max(3, r0 * 0.18), labels=(fg > 0), exclude_border=False)
+    coords = peak_local_max(dist, min_distance=max(5, int(r0 * 0.75)), threshold_abs=max(3, r0 * 0.45), labels=(fg > 0), exclude_border=False)
     markers = np.zeros((h, w), np.int32)
     for i, (yy, xx) in enumerate(coords, 1):
         markers[yy, xx] = i
@@ -421,24 +458,21 @@ def watershed_rbc_candidates(img: np.ndarray, strict_purple: Optional[np.ndarray
     labels_ws = watershed(-dist, markers, mask=(fg > 0))
     candidates: List[List[float]] = []
     for reg in regionprops(labels_ws):
+        area = reg.area
+        # Gate only on area: a distance peak that survived threshold_abs already
+        # marks a cell-sized solid core. The watershed *region* shape (bbox,
+        # aspect, circularity) is unreliable -- a basin that bleeds into a touching
+        # neighbour is elongated yet its peak is a real cell -- so gating on shape
+        # discards the very clump cells we are trying to recover.
+        if area < math.pi * (r0 * 0.35) ** 2 or area > math.pi * (r0 * 2.20) ** 2:
+            continue
         y1, x1, y2, x2 = reg.bbox
         bw, bh = x2 - x1, y2 - y1
-        area = reg.area
-        if area < math.pi * (r0 * 0.35) ** 2 or area > math.pi * (r0 * 1.55) ** 2:
-            continue
-        if bw < r0 * 0.48 or bh < r0 * 0.48 or bw > r0 * 2.50 or bh > r0 * 2.50:
-            continue
-        aspect = bw / (bh + 1e-6)
-        if aspect < 0.42 or aspect > 2.35:
-            continue
-        perimeter = reg.perimeter
-        circularity = 4 * math.pi * area / (perimeter * perimeter + 1e-9) if perimeter > 0 else 0
-        if circularity < 0.18:
-            continue
         cy, cx = reg.centroid
-        radius = float(np.clip(0.50 * max(bw, bh), r0 * 0.50, r0 * 1.25))
-        score = 0.5 * circularity - 0.08 * abs(radius - r0) / r0
-        candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), score])
+        # GT RBC half-side ~ r0 and very consistent; emit an r0-sized box (lightly
+        # adapted to the region) regardless of the jagged region extent.
+        radius = float(np.clip(0.50 * max(bw, bh), r0 * 0.90, r0 * 1.15)) * 1.06
+        candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), 0.45])
     return merge_by_center(candidates, 0.42 * r0)
 
 
@@ -449,17 +483,9 @@ def watershed_visualization(img: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     purple, *_ = purple_mask_strict(img)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    _, S, V = cv2.split(hsv)
-    L, _, _ = cv2.split(lab)
-    fg = (((S > 15) & (V < 252)) | (L < 246)).astype(np.uint8) * 255
-    purple_d = cv2.dilate(purple, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
-    fg[purple_d > 0] = 0
-    fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-    fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ensure_odd(int(r0 * 0.18), 5), ensure_odd(int(r0 * 0.18), 5))))
+    fg = rbc_filled_foreground(img, r0, purple)
     dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
-    coords = peak_local_max(dist, min_distance=max(5, int(r0 * 0.52)), threshold_abs=max(3, r0 * 0.18), labels=(fg > 0), exclude_border=False)
+    coords = peak_local_max(dist, min_distance=max(5, int(r0 * 0.75)), threshold_abs=max(3, r0 * 0.45), labels=(fg > 0), exclude_border=False)
     markers = np.zeros((h, w), np.int32)
     for i, (yy, xx) in enumerate(coords, 1):
         markers[yy, xx] = i
