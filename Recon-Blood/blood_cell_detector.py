@@ -306,6 +306,11 @@ def detect_rbc_rule(
 ) -> List[Box]:
     """RBC detector based on area, circularity and resolution-aware size rules.
 
+    Contours are extracted with RETR_LIST: the inner "hole" of each ring-shaped
+    cell becomes its own contour, which is what splits a touching clump into one
+    detection per cell. The cost is that the clump's *outer* boundary also passes
+    the gates and yields an oversized box wrapping cells it already detected; a
+    containment-suppression pass removes that redundant wrapper afterwards.
     Candidates whose centre falls inside an already-detected WBC box are dropped,
     so a white blood cell is never carved up into spurious RBCs.
     """
@@ -319,7 +324,7 @@ def detect_rbc_rule(
     pd = int(max(2, round(r0 * 0.08)))
     purple_d = cv2.dilate(strict_purple, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * pd + 1, 2 * pd + 1)))
     contours, _ = cv2.findContours(th, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    candidates: List[List[float]] = []
+    candidates: List[List[float]] = []  # [class, x1, y1, x2, y2, score, is_clump]
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < math.pi * (r0 * 0.16) ** 2 or area > math.pi * (r0 * 2.25) ** 2:
@@ -347,8 +352,20 @@ def detect_rbc_rule(
         # half-size toward r0 (the resolution-derived radius) for better IoU.
         radius = float(np.clip(0.5 * max(bw, bh), r0 * 0.88, r0 * 1.18))
         score = circularity - 0.08 * abs(radius - r0) / r0
-        candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), score])
-    return merge_by_center(candidates, 0.43 * r0)
+        # A contour wider/taller than ~1.5 cell radii is a clump's outer boundary,
+        # not a single cell; flag it so the wrapper can be suppressed below.
+        is_clump = 1.0 if (bw > 1.5 * r0 or bh > 1.5 * r0) else 0.0
+        candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), score, is_clump])
+    # Containment suppression: drop a clump wrapper box when a finer (non-clump)
+    # detection centre already lies inside it, so one cell is not counted twice
+    # (once as itself and once inside the oversized clump box).
+    fine_centers = [((b[1] + b[3]) / 2, (b[2] + b[4]) / 2) for b in candidates if not b[6]]
+    kept: List[List[float]] = []
+    for b in candidates:
+        if b[6] and any(b[1] <= ox <= b[3] and b[2] <= oy <= b[4] for ox, oy in fine_centers):
+            continue
+        kept.append(b[:6])
+    return merge_by_center(kept, 0.43 * r0)
 
 
 def watershed_rbc_candidates(img: np.ndarray, strict_purple: Optional[np.ndarray] = None) -> List[Box]:
