@@ -529,6 +529,12 @@ def detect_platelets_rule(
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     wbc_boxes = wbc_boxes or []
+    # Pad the WBC exclusion boxes outward a little: a WBC nucleus stains its
+    # immediate rim, producing granular purple specks just *outside* the box that
+    # otherwise pass as false platelets. The pad is small (0.22*r0) so genuine
+    # platelets sitting clearly away from a WBC are still kept.
+    wbc_excl = [[b[0], b[1] - 0.22 * r0, b[2] - 0.22 * r0, b[3] + 0.22 * r0, b[4] + 0.22 * r0]
+                for b in wbc_boxes]
     feats, boxes = extract_platelet_components(img)
     if len(boxes) == 0:
         return []
@@ -549,7 +555,7 @@ def detect_platelets_rule(
             continue
         cx = (b[1] + b[3]) / 2
         cy = (b[2] + b[4]) / 2
-        if point_in_boxes(cx, cy, wbc_boxes):    # inside a WBC -> not a platelet
+        if point_in_boxes(cx, cy, wbc_excl):     # inside/touching a WBC -> not a platelet
             continue
         score = s_std + 10 * area_r
         out.append([2, max(0, cx - half), max(0, cy - half), min(w, cx + half), min(h, cy + half), score])
