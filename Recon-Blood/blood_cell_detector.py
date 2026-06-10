@@ -625,12 +625,48 @@ def detect_platelets_ml(img: np.ndarray, model, threshold: float = 0.60) -> List
     return merge_by_center(scored, 0.42 * r0)
 
 
+def hough_rbc_candidates(img: np.ndarray, strict_purple: Optional[np.ndarray] = None,
+                         wbc_boxes: Optional[Sequence[Box]] = None, param2: int = 24) -> List[Box]:
+    """Hough-circle RBC recovery for touching / incomplete-ring cells.
+
+    RBCs are near-uniform circles (radius ~ r0). The contour detector relies on
+    each cell's pale centre forming a closed "hole"; that fails where membranes
+    merge (touching cells) or where the ring is only a faint arc. The Hough
+    circle accumulator votes from even partial / overlapping arcs, so it recovers
+    those cells where watershed (a blob prior) cannot. Returned as supplementary
+    candidates, filtered against WBC boxes and dense-purple (WBC/platelet)
+    regions; boxes are r0-sized to match the consistent RBC ground truth.
+    """
+    h, w = img.shape[:2]
+    r0 = shape_rbc_radius(h, w)
+    wbc_boxes = wbc_boxes or []
+    if strict_purple is None:
+        strict_purple, *_ = purple_mask_strict(img)
+    gray = cv2.medianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), 5)
+    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2, minDist=r0 * 1.1,
+                               param1=80, param2=param2,
+                               minRadius=int(r0 * 0.75), maxRadius=int(r0 * 1.20))
+    if circles is None:
+        return []
+    pd = int(max(2, round(r0 * 0.08)))
+    purple_d = cv2.dilate(strict_purple, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * pd + 1, 2 * pd + 1)))
+    out: List[List[float]] = []
+    for cx, cy, _r in circles[0]:
+        if purple_d[int(min(h - 1, max(0, cy))), int(min(w - 1, max(0, cx)))] > 0:
+            continue
+        if point_in_boxes(cx, cy, wbc_boxes):  # inside a WBC -> not an RBC
+            continue
+        out.append([1, max(0, cx - r0), max(0, cy - r0), min(w, cx + r0), min(h, cy + r0)])
+    return merge_by_center(out, 0.42 * r0)
+
+
 def detect_cells(
     img: np.ndarray,
     mode: str = "Improved classical",
     platelet_model=None,
     platelet_threshold: float = 0.60,
     use_watershed: bool = False,
+    use_hough: bool = True,
     gaussian_kernel: int = 5,
     adaptive_block_ratio: float = 1.25,
     adaptive_c: int = 5,
@@ -642,15 +678,23 @@ def detect_cells(
 
     WBC is detected first; its boxes are then used to exclude the same regions
     from RBC and platelet detection, so a white blood cell cannot be re-counted
-    as red cells or platelets.
+    as red cells or platelets. Hough circles supplement the RBC contour pass to
+    recover touching / faint-ring cells (additive, deduped by centre distance).
     """
     h, w = img.shape[:2]
+    r0 = shape_rbc_radius(h, w)
     wbc, _violet = detect_wbc(img)
     rbc = detect_rbc_rule(img, None, gaussian_kernel, adaptive_block_ratio, adaptive_c, close_kernel, rbc_min_circularity, wbc_boxes=wbc)
+    if use_hough:
+        # Supplement with Hough circles for clump / incomplete-ring RBCs the
+        # contour pass misses; merge keeps existing boxes (higher score) and only
+        # adds circles with no nearby detection.
+        hough = hough_rbc_candidates(img, wbc_boxes=wbc)
+        rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in hough], 0.42 * r0)
     if use_watershed:
         # Add only missing watershed candidates by center-distance merge.
         ws = [b for b in watershed_rbc_candidates(img) if not point_in_boxes((b[1] + b[3]) / 2, (b[2] + b[4]) / 2, wbc)]
-        rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in ws], 0.42 * shape_rbc_radius(h, w))
+        rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in ws], 0.42 * r0)
     if mode.lower().startswith("rule"):
         platelets = detect_platelets_rule(img, platelet_min_circularity, wbc_boxes=wbc)
     else:
