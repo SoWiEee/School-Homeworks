@@ -373,14 +373,21 @@ def detect_rbc_rule(
         # not a single cell; flag it so the wrapper can be suppressed below.
         is_clump = 1.0 if (bw > 1.5 * r0 or bh > 1.5 * r0) else 0.0
         candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), score, is_clump])
-    # Containment suppression: drop a clump wrapper box when a finer (non-clump)
-    # detection centre already lies inside it, so one cell is not counted twice
-    # (once as itself and once inside the oversized clump box).
+    # Containment suppression: drop a clump wrapper box only when a finer
+    # (non-clump) detection centre lies *well inside* it (within the central 80%),
+    # so the wrapper is genuinely redundant. Checking against the full wrapper box
+    # over-suppressed: a separate cell merely touching the clump's edge wrongly
+    # dropped the wrapper, losing visibly-present cells (worse once boxes grew in
+    # fix 9). The 0.80 shrink keeps fix 6's de-duplication while recovering them.
+    contain_shrink = 0.80
     fine_centers = [((b[1] + b[3]) / 2, (b[2] + b[4]) / 2) for b in candidates if not b[6]]
     kept: List[List[float]] = []
     for b in candidates:
-        if b[6] and any(b[1] <= ox <= b[3] and b[2] <= oy <= b[4] for ox, oy in fine_centers):
-            continue
+        if b[6]:
+            mx, my = (b[1] + b[3]) / 2, (b[2] + b[4]) / 2
+            hw, hh = (b[3] - b[1]) / 2 * contain_shrink, (b[4] - b[2]) / 2 * contain_shrink
+            if any(mx - hw <= ox <= mx + hw and my - hh <= oy <= my + hh for ox, oy in fine_centers):
+                continue
         kept.append(b[:6])
     return merge_by_center(kept, 0.43 * r0)
 
