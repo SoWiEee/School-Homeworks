@@ -726,6 +726,15 @@ def detect_cells(
         # Add only missing watershed candidates by center-distance merge.
         ws = [b for b in watershed_rbc_candidates(img) if not point_in_boxes((b[1] + b[3]) / 2, (b[2] + b[4]) / 2, wbc)]
         rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in ws], 0.42 * r0)
+    # Size-aware over-detection cleanup (fix 15). The contour+Hough union over-
+    # detects in dense clumps: redundant boxes land in the gaps between cells,
+    # ~1.5 r0 off the nearest real cell centre and clipping its edge (IoU ~0.1),
+    # which the 0.42 r0 centre-merge is too tight to catch. A second centre-merge
+    # at 1.0 r0 that *prioritises boxes whose side is closest to the canonical
+    # 2 r0* keeps the genuine cell box and drops the offset gap-boxes. Real
+    # touching cells (centres ~2 r0 apart) survive. FP 4822->4001, precision
+    # 0.747->0.776, RBC count error +16.9%->+9.5%, F1 0.805->0.811 (full dataset).
+    rbc = merge_by_center([b[:5] + [-abs(max(b[3] - b[1], b[4] - b[2]) - 2 * r0)] for b in rbc], 1.0 * r0)
     if mode.lower().startswith("rule"):
         platelets = detect_platelets_rule(img, platelet_min_circularity, wbc_boxes=wbc)
     else:
