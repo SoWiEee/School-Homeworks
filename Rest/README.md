@@ -14,9 +14,7 @@
 
 ```text
 Rest/
-├── main.cpp                 # 原始多執行緒 + TUI 版本
-├── main_bypass.cpp          # 嘗試處理隊首阻塞 / bypass 的版本
-├── sushi_safe.cpp           # 較穩定的 worker-thread 模擬版本，建議優先查看
+├── sushi_safe.cpp           # 最終版本：worker-thread 座位資源模擬器
 ├── output_rule.txt          # 指定輸出格式範例
 ├── dev_test/                # 開發測資
 │   ├── base.csv
@@ -35,13 +33,13 @@ Rest/
 
 餐廳有三種座位與兩種輔助資源：
 
-| 資源 | `main.cpp` 預設 | `sushi_safe.cpp` 預設 | 說明 |
-|---|---:|---:|---|
-| 單人座 `Sxx` | 20 | 20 | 可連續分配給多人的吧檯座位 |
-| 四人沙發 `4Pxx` | 8 | 8 | 一組客人佔用一張 |
-| 六人沙發 `6Pxx` | 5 | 5 | 一組客人佔用一張 |
-| 嬰兒椅 `B` | 4 | 4 | `baby_chair` 欄位指定需求數 |
-| 輪椅位 `W` | 2 | 2 | 輪椅客人或 `wheel_chair > 0` 會消耗 |
+| 資源 | 預設數量 | 說明 |
+|---|---:|---|
+| 單人座 `Sxx` | 20 | 可連續分配給多人的吧檯座位 |
+| 四人沙發 `4Pxx` | 8 | 一組客人佔用一張 |
+| 六人沙發 `6Pxx` | 5 | 一組客人佔用一張 |
+| 嬰兒椅 `B` | 4 | `baby_chair` 欄位指定需求數 |
+| 輪椅位 `W` | 2 | 輪椅客人或 `wheel_chair > 0` 會消耗 |
 
 > 早期評分規格中也記錄過「單人座 14、四人沙發 5、六人沙發 3、嬰兒椅 3、輪椅 2」的初始值；目前程式碼實際使用的是上表的預設值。
 
@@ -93,7 +91,7 @@ id,arrival_time,type,party_size,baby_chair,wheel_chair,est_dining_time
   - 一般沙發滿了才使用無障礙沙發。
   - 若沙發都不可用，嘗試降級為連續單人座。
 
-`main.cpp` 的規則與 `sushi_safe.cpp` 很接近，但有 TUI 顯示與 one-thread-per-customer 的結構；`sushi_safe.cpp` 則改成固定 waiter threads，較容易避免 race condition 與輸出交錯。
+目前保留的最終版本是 `sushi_safe.cpp`。它採用固定 waiter threads，較容易避免 race condition 與輸出交錯。
 
 ## 等待與同步策略
 
@@ -138,8 +136,6 @@ maxSkips = 3
 
 ## 編譯與執行
 
-建議優先使用 `sushi_safe.cpp`：
-
 ```bash
 cd Rest
 g++ -std=c++17 -O2 -pthread sushi_safe.cpp -o sushi_safe
@@ -162,13 +158,6 @@ g++ -std=c++17 -O2 -pthread sushi_safe.cpp -o sushi_safe.exe
 .\sushi_safe.exe final_test\test_race_condition.csv
 .\sushi_safe.exe final_test\test_resource_exhaustion.csv
 .\sushi_safe.exe final_test\test_complex.csv
-```
-
-`main.cpp` 也可以編譯，但它會啟動終端機 TUI，輸出會持續刷新畫面：
-
-```bash
-g++ -std=c++17 -O2 -pthread main.cpp -o sushi_tui
-./sushi_tui dev_test/base.csv
 ```
 
 ## 測資說明
@@ -207,19 +196,12 @@ README 早期紀錄的 FIFO baseline 如下，作為比較參考：
 
 這些數字代表單純 FIFO 策略下最後一組入座與最後離席時間；實際版本若允許隊首 bypass、家庭降級或不同資源策略，結果可能不同。
 
-## 實作版本差異
+## 最終版本重點
 
-- `main.cpp`
-  - 一組到達客人一個 thread。
-  - 內建 TUI，顯示目前時間、座位佔用、等待佇列與 recent logs。
-  - 適合展示資源狀態，但輸出較不適合自動比對。
+`sushi_safe.cpp` 是目前保留的最終版本：
 
-- `main_bypass.cpp`
-  - 在 `main.cpp` 基礎上嘗試加入隊首 bypass 策略。
-  - 保留 TUI 顯示。
-
-- `sushi_safe.cpp`
-  - 固定 3 個 waiter threads 處理 task。
-  - release / preload / arrival 有明確優先順序。
-  - 使用 head skip count 避免隊首阻塞。
-  - 較適合作為最後提交或測試版本。
+- 固定 3 個 waiter threads 處理 task。
+- release / preload / arrival 有明確優先順序。
+- 使用 head skip count 避免隊首阻塞。
+- 使用邏輯時鐘跳到下一個事件時間，不逐秒空轉。
+- 輸出純文字事件紀錄，較適合測試與比對。

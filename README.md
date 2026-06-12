@@ -42,10 +42,9 @@ g++ -std=c++17 -O2 -o run Q1.cpp
 
 主要檔案：
 
-- `main.cpp`：主要解法。
-- `main_bypass.cpp`、`sushi_safe.cpp`：其他版本或實驗解法。
-- `test_*.csv`：正式測資。
-- `base.csv`、`deadlock.csv`、`race.csv`、`preoccupied.csv`：開發測資。
+- `sushi_safe.cpp`：最終版座位資源模擬器。
+- `final_test/test_*.csv`：正式測資。
+- `dev_test/base.csv`、`dev_test/deadlock.csv`、`dev_test/race.csv`、`dev_test/preoccupied.csv`：開發測資。
 
 ### HPCxAI Camp 2025
 
