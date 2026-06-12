@@ -108,8 +108,10 @@ id,arrival_time,type,party_size,baby_chair,wheel_chair,est_dining_time
 
 ```cpp
 waiters = 3
-maxSkips = 3
+maxSkips = 1000000
 ```
+
+`maxSkips` 設成很大的值，代表隊首暫時無法入座時，允許後方可入座客人先被服務，避免 head-of-line blocking 拖慢整體完成時間。座位相容規則與資源數量不變。
 
 ## 輸出格式
 

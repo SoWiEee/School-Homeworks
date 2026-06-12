@@ -951,7 +951,7 @@ int main(int argc, char** argv) {
     SushiBarSimSafe sim(
         /*singles*/20, /*4P*/8, /*6P*/5, /*baby*/4, /*wheel*/2,
         /*waiters*/3,
-        /*maxSkips*/3
+        /*maxSkips*/1000000
     );
 
     vector<Customer> rows;
