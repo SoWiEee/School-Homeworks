@@ -182,9 +182,9 @@ g++ -std=c++17 -O2 -pthread sushi_safe.cpp -o sushi_safe.exe
 | `final_test/test_complex.csv` | 10% | 預載、特殊需求與複合排程 |
 | 進階功能 | 10% | 家庭降級、輸出內容展示等 |
 
-## Baseline FIFO 紀錄
+## Baseline (FIFO)
 
-README 早期紀錄的 FIFO baseline 如下，作為比較參考：
+基本 FIFO 設計的側資，通過即可拿分：
 
 | Test Case | Last Seated | Last Departure |
 |---|---:|---:|
