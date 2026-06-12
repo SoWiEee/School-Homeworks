@@ -5,7 +5,6 @@ TXL-PBC 傳統影像處理偵測器工具模組。
 - 基礎前處理流程：灰階化、高斯模糊、自適應二值化、形態學閉運算/開運算。
 - 以顏色、面積、圓度和尺寸規則為基礎的 WBC/RBC/血小板偵測器。
 - 選用的分水嶺 + 距離轉換輔助功能，用於紅血球黏連視覺化。
-- 選用的 ExtraTrees 血小板分類器（以手工特徵訓練），屬於傳統機器學習，非神經網路。
 """
 from __future__ import annotations
 
@@ -196,16 +195,9 @@ def purple_mask_strict(img: np.ndarray):
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     H, S, V = cv2.split(hsv)
     L, A, B = cv2.split(lab)
-    # B 通道（LAB 藍-黃軸）能清楚區分真正的白血球/深紫色區域（B ≈ 87-105）
-    # 與淺紫色紅血球（B ≥ ~117）。若 B 閥值設得太鬆，會把偏藍的
-    # 紅血球也納入紫色遮罩，使其被排除在紅血球偵測之外，因此這裡維持嚴格。
-    # 此遮罩僅用於排除紅血球/分水嶺/視覺化，從不用於白血球偵測。
-    #
-    # B 截斷值會根據玻片整體染色自適應調整：在整體偏紫的玻片上，
-    # 紅血球本身的 B 值也會降低，落入固定 B<115 的範圍，導致被錯誤排除於
-    # 紅血球偵測（實測：最紫的三分之一玻片 RBC 召回率 0.79，最淺的為 0.93）。
-    # 對這些玻片改用 B_med - 18 作為截斷值，可避免吞掉偏移的紅血球；
-    # 在正常玻片上（B_med >= 133），截斷值維持在 115，行為不變。
+    # 這個遮罩只用來標出「真的深紫區」，讓 RBC 偵測避開 WBC/血小板。
+    # LAB-B 越低代表越偏藍紫；紅血球即使有些偏紫，通常還是比白血球核淺。
+    # 若整張片子本來就偏紫，B 門檻會跟著全圖中位數下修，避免把整片紅血球都排掉。
     b_med = float(np.median(B))
     b_cut = min(115.0, b_med - 18.0)
     purple = (((S > 80) & (V < 210) & (A > 145) & (B < b_cut)) |
@@ -290,19 +282,12 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
         s_core = float(np.median(S[region]))
         b_core = float(np.median(B[region]))
         is_nucleus = s_core >= 100 or b_core <= 102
-        # 超大紫色斑塊（>= 4.5*r0）只有在核心飽和度遠超全圖時，才算是真實的（大型/單核球）細胞核。
-        # 在整體偏紫的玻片上，紫色遮罩會膨脹成佈滿畫面的斑塊，其核心的飽和度
-        # 只比全圖中位數高一點點（s_core - s_med ≈ 24，真實大型白血球約為 104）；
-        # 若不加此門檻，那個膨脹斑塊會成為一個涵蓋全圖的白血球框，
-        # 進而把框內所有紅血球/血小板都排除（受影響影像的 RBC 召回率 -> 0）。
+        # 超大的紫色斑塊只有在明顯比整張圖更飽和時才採用。
+        # 這可以避免整張偏紫的背景被合成一個橫跨全圖的白血球框。
         oversized = max(bw, bh) >= 4.5 * r0
         strong_stain = (s_core - s_med) >= 70.0
-        # 精準度門檻（修正 14）。剩餘的假陽性是整體偏紫玻片上的小型、
-        # 弱紫色斑塊：與真實核心相比，它們更小（最長邊中位數 2.4*r0 vs 3.9）
-        # 且與自身背景的飽和度對比更弱（s_core - s_med ≈ 44 vs ~120）。
-        # 加入尺寸下限和*通用*相對飽和度門檻（與超大斑塊分支同理，
-        # 現在套用於所有尚未達深紫色的候選框），可在不影響召回率的情況下排除它們：
-        # FP 77 -> 28，所有真實白血球保留（召回率不變），F1 0.930 -> 0.949（全資料集）。
+        # 小而淡的紫斑常來自染色暈染，不像真正白血球核。
+        # 尺寸下限與相對飽和度檢查可以把這些假候選擋掉。
         if max(bw, bh) < 1.6 * r0:
             continue
         if (s_core - s_med) < 60.0 and b_core > 102:
@@ -314,9 +299,7 @@ def detect_wbc(img: np.ndarray) -> Tuple[List[Box], np.ndarray]:
             pad = int(0.10 * max(bw, bh))
             score = original_area / (r0 * r0)
             boxes.append([0, max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad), score])
-    # 白血球數量稀少（每張 1-2 個），較大的中心合併半徑能把
-    # 同一細胞核的碎裂葉片合併成單一框（降低碎裂假陽性），
-    # 而不會把不同的細胞合併——實測在 1.8*r0 內不會損失任何真陽性。
+    # 白血球數量少，中心距離合併可以把同一顆核的碎裂區塊合成單一框。
     return merge_by_center(boxes, 1.8 * r0), violet
 
 
@@ -384,12 +367,8 @@ def detect_rbc_rule(
         # 而非單一細胞；標記以便後續步驟抑制。
         is_clump = 1.0 if (bw > 1.5 * r0 or bh > 1.5 * r0) else 0.0
         candidates.append([1, max(0, cx - radius), max(0, cy - radius), min(w, cx + radius), min(h, cy + radius), score, is_clump])
-    # 包含抑制：僅當較精細的（非群體）偵測中心落在框的中央 80%「深處」時，
-    # 才捨棄群體外部框——此時外部框確實是多餘的。
-    # 若對整個框判斷包含關係，會過度抑制：
-    # 一個只是碰到群體邊緣的獨立細胞，會錯誤地讓外部框被捨棄，
-    # 造成漏偵測（在修正 9 框變大後更嚴重）。
-    # 0.80 縮小保留了修正 6 的去重效果，同時恢復了被誤刪的細胞。
+    # 包含抑制：若一個大框中央已經有更像單顆 RBC 的細框，就丟掉大框。
+    # 只看中央 80%，避免把只是靠在大框邊緣的獨立細胞誤刪。
     contain_shrink = 0.80
     fine_centers = [((b[1] + b[3]) / 2, (b[2] + b[4]) / 2) for b in candidates if not b[6]]
     kept: List[List[float]] = []
@@ -573,10 +552,8 @@ def detect_platelets_rule(
     h, w = img.shape[:2]
     r0 = shape_rbc_radius(h, w)
     wbc_boxes = wbc_boxes or []
-    # 將白血球排除框稍微向外填充：白血球細胞核會染色其緊鄰邊緣，
-    # 在框外產生顆粒狀紫色斑點，這些斑點原本會被誤判為血小板。
-    # 白血球框已包含 0.10*邊長的填充，因此這裡再額外填充 0.10*r0 就足夠——
-    # 再大的話會過度排除真正靠近白血球的血小板。
+    # 白血球核附近常有紫色碎屑，因此排除框稍微外擴。
+    # 外擴不能太大，避免吃掉真的、靠近白血球的血小板。
     wbc_excl = [[b[0], b[1] - 0.10 * r0, b[2] - 0.10 * r0, b[3] + 0.10 * r0, b[4] + 0.10 * r0]
                 for b in wbc_boxes]
     feats, boxes = extract_platelet_components(img)
@@ -591,20 +568,12 @@ def detect_platelets_rule(
         s_mean, s_std, b_mean, gray_std = float(f[19]), float(f[20]), float(f[43]), float(f[50])
         if gray_std < 5:                          # 完全平整的斑點永遠不是血小板
             continue
-        # 強染色顆粒體（原始門檻）：飽和度與灰階變異高的亮紫色體。
-        # 修正 16 新增兩個精準度門檻：真實血小板*深度*紫（B_mean 第 90 百分位 = 105）
-        # 且形狀較圓，而剩餘的假陽性偏藍（B_mean 中位數 108）且邊緣不規則
-        # （圓度中位數 0.52 vs 真實 0.80）。
-        # 將 B_mean 上限設為 110、圓度下限提高至 0.30（透過 min_circularity 新預設值），
-        # 可排除它們：FP 176 -> 96，精準率 0.69 -> 0.80，F1 0.715 -> 0.759
-        # （全資料集，召回率維持在 0.72，僅損失約 9 個真實血小板）。
+        # 強染顆粒型血小板：要夠紫、內部變化夠明顯，形狀也不能太破碎。
+        # 這能排除大多數平滑或不規則的紫色雜點。
         strong = (0.06 <= area_r <= 0.80 and s_mean >= 75 and b_mean <= 110
                   and s_std >= 16 and circ >= min_circularity)
-        # 淡染但形狀圓的體：約四分之一的真實血小板染色較弱
-        # （s_mean ≈ 68, s_std ≈ 13），剛好低於強染色門檻。
-        # 它們仍然具有近圓形、明顯偏紫的形狀（circ >= 0.68, b <= 112），
-        # 可以與不規則的淡色碎屑區分開來
-        # （+8 TP 換 +2 FP，若直接降低飽和度下限則為 +18 FP）。
+        # 淡染但圓的血小板：顏色與紋理較弱，但仍偏紫且接近圓形。
+        # 用圓形度把它和不規則碎屑分開。
         faint_round = (0.08 <= area_r <= 0.55 and s_mean >= 60 and b_mean <= 112
                        and s_std >= 10 and circ >= 0.68)
         if not (strong or faint_round):
@@ -706,13 +675,9 @@ def detect_cells(
         # 透過中心距合併，僅新增分水嶺中缺少的候選框。
         ws = [b for b in watershed_rbc_candidates(img) if not point_in_boxes((b[1] + b[3]) / 2, (b[2] + b[4]) / 2, wbc)]
         rbc = merge_by_center([b + [0.50] for b in rbc] + [b + [0.45] for b in ws], 0.42 * r0)
-    # 尺寸感知過度偵測清理（修正 15）。輪廓+Hough 聯集在密集群體中
-    # 會過度偵測：多餘的框落在細胞間隙，距最近真實細胞中心約 1.5 r0，
-    # 僅切到邊緣（IoU ≈ 0.1），而 0.42 r0 的中心合併不夠緊以捕捉它們。
-    # 以 1.0 r0 的中心合併再做一次，*優先保留邊長最接近標準 2 r0 的框*，
-    # 保留真實細胞框並捨棄偏移的間隙框。
-    # 真正相鄰的細胞（中心距約 2 r0）可以存活。
-    # FP 4822->4001，精準率 0.747->0.776，RBC 計數誤差 +16.9%->+9.5%，F1 0.805->0.811（全資料集）。
+    # 密集 RBC 區會產生落在細胞縫隙的多餘框。
+    # 最後再做一次尺寸感知去重：優先保留邊長接近標準 2*r0 的框。
+    # 真正相鄰的 RBC 中心距約 2*r0，通常不會被這步合併掉。
     rbc = merge_by_center([b[:5] + [-abs(max(b[3] - b[1], b[4] - b[2]) - 2 * r0)] for b in rbc], 1.0 * r0)
     if mode.lower().startswith("rule"):
         platelets = detect_platelets_rule(img, platelet_min_circularity, wbc_boxes=wbc)
