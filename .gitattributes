@@ -1,0 +1,10 @@
+* text=auto
+/comp_specfem3d/DATA linguist-vendored
+/comp_specfem3d/EXAMPLES linguist-vendored
+/comp_specfem3d/external_libs linguist-vendored
+/comp_specfem3d/m4 linguist-vendored
+/comp_specfem3d/obj linguist-vendored
+/comp_specfem3d/SEM linguist-vendored
+/comp_specfem3d/setup linguist-vendored
+/comp_specfem3d/utils linguist-vendored
+/comp_specfem3d/tests linguist-vendored
