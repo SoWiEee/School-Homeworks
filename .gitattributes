@@ -1,10 +1,5 @@
 * text=auto
-HPCxAI_Camp_2025/comp_specfem3d/DATA linguist-vendored
-HPCxAI_Camp_2025/comp_specfem3d/EXAMPLES linguist-vendored
-HPCxAI_Camp_2025/comp_specfem3d/external_libs linguist-vendored
-HPCxAI_Camp_2025/comp_specfem3d/m4 linguist-vendored
-HPCxAI_Camp_2025/comp_specfem3d/obj linguist-vendored
-HPCxAI_Camp_2025/comp_specfem3d/SEM linguist-vendored
-HPCxAI_Camp_2025/comp_specfem3d/setup linguist-vendored
-HPCxAI_Camp_2025/comp_specfem3d/utils linguist-vendored
-HPCxAI_Camp_2025/comp_specfem3d/tests linguist-vendored
+
+# Bundled SPECFEM3D course artifact / third-party code. Exclude it from
+# GitHub Linguist language statistics so Fortran does not dominate the repo.
+HPCxAI_Camp_2025/comp_specfem3d/** linguist-vendored
